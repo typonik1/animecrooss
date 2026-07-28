@@ -25,5 +25,10 @@ async def scheduler():
         await asyncio.sleep(20)
 async def main():
     if not config.API_ID or not config.API_HASH or not config.BOT_TOKEN: raise RuntimeError("Заполни API_ID, API_HASH и BOT_TOKEN в .env")
-    storage.init(); await reader.start(); await bot.start(bot_token=config.BOT_TOKEN); admin.register(bot,reader); await notify("Бот запущен ✅"); await builder.build_day(reader); await asyncio.gather(scheduler(),bot.run_until_disconnected())
+    storage.init(); await reader.start()
+    if not config.OWNER_ID:
+        me = await reader.get_me()
+        config.OWNER_ID = me.id
+        logging.getLogger("main").info("OWNER_ID автоматически определён: %s", config.OWNER_ID)
+    await bot.start(bot_token=config.BOT_TOKEN); admin.register(bot,reader); await notify("Бот запущен ✅"); await builder.build_day(reader); await asyncio.gather(scheduler(),bot.run_until_disconnected())
 if __name__=="__main__": asyncio.run(main())
