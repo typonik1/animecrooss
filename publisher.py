@@ -5,7 +5,10 @@ async def publish(reader, bot, item) -> bool:
     msg = await reader.get_messages(item["source"], ids=item["message_id"])
     if not msg or not filters.get_video(msg): storage.set_status(item["id"], "failed"); return False
     parsed = await enrich.parse_caption(msg.message or "", filters.file_name_of(msg))
-    if parsed["ad"]: storage.set_status(item["id"], "skipped"); storage.mark_posted(item["source"], msg.id, item["file_uid"], item["fingerprint"]); return False
+    # Модель может принять обычную строку «Автор: ...» за рекламу канала.
+    # Пропускаем только если AI-флаг подтверждается детерминированным фильтром.
+    if parsed["ad"] and filters.looks_like_ad(msg):
+        storage.set_status(item["id"], "skipped"); storage.mark_posted(item["source"], msg.id, item["file_uid"], item["fingerprint"]); return False
     path = await reader.download_media(msg, file=config.DOWNLOAD_DIR)
     if not path: storage.set_status(item["id"], "failed"); return False
     try:
