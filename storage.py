@@ -68,6 +68,13 @@ def take_slot(day: str, slot: str) -> dict | None:
 
 def set_status(queue_id: int, status: str) -> None:
     with _db() as db: db.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id)); db.commit()
+
+def clear_pending(day: str) -> int:
+    with _db() as db:
+        result = db.execute("DELETE FROM queue WHERE day=? AND status='pending'", (day,))
+        db.commit()
+    return result.rowcount
+
 def list_queue(day: str) -> list[tuple]:
     with _db() as db: return db.execute("SELECT slot,source,message_id,score,is_fallback,status FROM queue WHERE day=? ORDER BY slot", (day,)).fetchall()
 def today() -> str: return datetime.now(config.TZ).strftime("%Y-%m-%d")

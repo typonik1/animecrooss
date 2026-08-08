@@ -1,7 +1,22 @@
-from telethon import events
+from telethon import Button, events
 import builder, config, publisher, storage
-HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\n/set key value /config /pause /resume /id"
+HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
 def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
+
+def queue_controls():
+    return Button.inline("🔄 Обновить очередь", b"refresh_queue")
+
+async def publish_now(reader, bot):
+    items = await builder.collect(reader, 1)
+    if not items:
+        return None
+    return await publisher.publish(reader, bot, items[0])
+
+async def refresh_queue(reader):
+    removed = storage.clear_pending(storage.today())
+    added = await builder.build_day(reader)
+    return removed, added
+
 def register(bot, reader):
     def owner(event): return is_owner(event)
     @bot.on(events.NewMessage(pattern=r"^/(start|help)"))
@@ -33,7 +48,7 @@ def register(bot, reader):
         await event.reply("Слоты: "+storage.get("slots"))
     @bot.on(events.NewMessage(pattern=r"^/queue"))
     async def queue(event):
-        if owner(event): await event.reply("\n".join(f"{s} {'🕓' if fb else '🆕'} {src}/{mid} · {st}" for s,src,mid,score,fb,st in storage.list_queue(storage.today())) or "Очередь пуста")
+        if owner(event): await event.reply("\n".join(f"{s} {'🕓' if fb else '🆕'} {src}/{mid} · {st}" for s,src,mid,score,fb,st in storage.list_queue(storage.today())) or "Очередь пуста", buttons=queue_controls())
     @bot.on(events.NewMessage(pattern=r"^/build"))
     async def build(event):
         if owner(event): await event.reply(f"Добавлено: {await builder.build_day(reader)}")
@@ -46,10 +61,14 @@ def register(bot, reader):
     @bot.on(events.NewMessage(pattern=r"^/now"))
     async def now(event):
         if not owner(event): return
-        for slot in storage.get_list("slots"):
-            item=storage.take_slot(storage.today(),slot)
-            if item: await event.reply("Опубликовано" if await publisher.publish(reader,bot,item) else "Ошибка публикации"); return
-        await event.reply("Очередь пуста")
+        result = await publish_now(reader, bot)
+        await event.reply("Опубликовано" if result is True else "Ошибка публикации" if result is False else "Свежих уникальных роликов не найдено")
+    @bot.on(events.CallbackQuery(data=b"refresh_queue"))
+    async def refresh(event):
+        if not is_owner(event): return
+        removed, added = await refresh_queue(reader)
+        await event.answer("Очередь обновлена", alert=False)
+        await event.edit(f"Очередь обновлена: удалено {removed}, добавлено {added}", buttons=queue_controls())
     @bot.on(events.NewMessage(pattern=r"^/set\s+(\w+)\s+(.+)"))
     async def setting(event):
         if owner(event):
