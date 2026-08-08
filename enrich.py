@@ -16,9 +16,9 @@ def _fallback_parse(text: str) -> dict:
     return {"anime": anime, "track": track, "ad": False}
 async def parse_caption(text: str, file_name: str = "") -> dict:
     if not config.ROUTERAI_API_KEY: return _fallback_parse(text)
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=config.ROUTERAI_API_KEY, base_url=config.ROUTERAI_BASE_URL, timeout=30)
     try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=config.ROUTERAI_API_KEY, base_url=config.ROUTERAI_BASE_URL, timeout=30)
         user_content = f"Подпись:\n{text or '(пусто)'}\nИмя файла: {file_name or '(нет)'}"[:2000]
         response = await client.chat.completions.create(model=config.ROUTERAI_MODEL, temperature=0, response_format={"type":"json_object"}, messages=[{"role":"system","content":SYSTEM},{"role":"user","content":user_content}])
         data = json.loads(response.choices[0].message.content or "{}")
