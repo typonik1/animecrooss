@@ -26,17 +26,25 @@ async def _scan(reader, source, limit, since, fresh):
     now = datetime.now(timezone.utc)
     min_age = timedelta(minutes=storage.get_int("min_age_min"))
     messages = await reader.get_messages(source, limit=limit)
-    threshold = filters.views_threshold(messages, storage.get_float("activity_multiplier")) if fresh else 0
-    result = []
+    eligible = []
     for msg in messages:
         if (
             not msg.date
             or msg.date < since
             or now - msg.date < min_age
             or not filters.is_good_video(msg)
-            or (fresh and (msg.views or 0) < threshold)
             or filters.looks_like_ad(msg)
         ):
+            continue
+        eligible.append(msg)
+
+    # Old posts have had much longer to accumulate views.  Including them in
+    # the median makes every genuinely fresh post look inactive, so compare a
+    # fresh video only with the other videos in the same eligibility window.
+    threshold = filters.views_threshold(eligible, storage.get_float("activity_multiplier")) if fresh else 0
+    result = []
+    for msg in eligible:
+        if fresh and (msg.views or 0) < threshold:
             continue
         uid, fingerprint = filters.fingerprint(msg)
         if not storage.is_used(source, msg.id, uid, fingerprint):

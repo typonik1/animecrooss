@@ -88,20 +88,73 @@ def test_now_returns_none_when_no_fresh_video_exists(monkeypatch):
     assert asyncio.run(admin.publish_now("reader", "bot")) is None
 
 
-def test_refresh_only_clears_pending_then_rebuilds(monkeypatch):
+def test_refresh_replaces_pending_only_after_new_items_are_collected(monkeypatch):
     import admin
 
     calls = []
     monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-09")
-    monkeypatch.setattr(admin.storage, "clear_pending", lambda day: calls.append(("clear", day)) or 2)
+    monkeypatch.setattr(admin.storage, "pending_count", lambda day: calls.append(("count", day)) or 2)
 
-    async def build_day(reader):
-        calls.append(("build", reader))
-        return 2
+    async def collect(reader, need):
+        calls.append(("collect", reader, need))
+        return [{"message_id": 1}, {"message_id": 2}]
 
-    monkeypatch.setattr(admin.builder, "build_day", build_day)
+    monkeypatch.setattr(admin.builder, "collect", collect)
+    monkeypatch.setattr(
+        admin.storage,
+        "replace_pending",
+        lambda day, items: calls.append(("replace", day, items)) or len(items),
+    )
     assert asyncio.run(admin.refresh_queue("reader")) == (2, 2)
-    assert calls == [("clear", "2026-08-09"), ("build", "reader")]
+    assert calls == [
+        ("count", "2026-08-09"),
+        ("collect", "reader", 2),
+        ("replace", "2026-08-09", [{"message_id": 1}, {"message_id": 2}]),
+    ]
+
+
+def test_refresh_keeps_pending_when_no_replacements_exist(monkeypatch):
+    import admin
+
+    monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-09")
+    monkeypatch.setattr(admin.storage, "pending_count", lambda day: 2)
+
+    async def collect(reader, need):
+        return []
+
+    monkeypatch.setattr(admin.builder, "collect", collect)
+    replaced = []
+    monkeypatch.setattr(admin.storage, "replace_pending", lambda *args: replaced.append(args))
+
+    assert asyncio.run(admin.refresh_queue("reader")) == (0, 0)
+    assert replaced == []
+
+
+def test_replace_pending_keeps_unreplaced_slots_and_history(tmp_path, monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "replace.db"))
+    import storage
+
+    importlib.reload(storage)
+    storage.init()
+    original = {"source": "@old", "file_uid": "", "fingerprint": ""}
+    storage.enqueue("2026-08-09", "10:00", {**original, "message_id": 1})
+    storage.enqueue("2026-08-09", "13:00", {**original, "message_id": 2})
+    storage.enqueue("2026-08-09", "18:00", {**original, "message_id": 3})
+    posted = storage.take_slot("2026-08-09", "18:00")
+    storage.set_status(posted["id"], "posted")
+
+    replacement = {
+        "source": "@new", "message_id": 9, "file_uid": "uid-9",
+        "fingerprint": "fp-9", "score": 99, "is_fallback": 0,
+    }
+    assert storage.replace_pending("2026-08-09", [replacement]) == 1
+    assert storage.list_queue("2026-08-09") == [
+        ("10:00", "@new", 9, 99.0, 0, "pending"),
+        ("13:00", "@old", 2, 0.0, 0, "pending"),
+        ("18:00", "@old", 3, 0.0, 0, "posted"),
+    ]
 
 
 def test_queue_controls_have_refresh_button():

@@ -13,9 +13,17 @@ async def publish_now(reader, bot):
     return await publisher.publish(reader, bot, items[0])
 
 async def refresh_queue(reader):
-    removed = storage.clear_pending(storage.today())
-    added = await builder.build_day(reader)
-    return removed, added
+    day = storage.today()
+    pending = storage.pending_count(day)
+    if not pending:
+        return 0, 0
+    # Collect while the current pending rows still exist.  This both excludes
+    # the old selections and lets us keep them if no replacements are found.
+    items = await builder.collect(reader, pending)
+    if not items:
+        return 0, 0
+    replaced = storage.replace_pending(day, items)
+    return replaced, replaced
 
 def register(bot, reader):
     def owner(event): return is_owner(event)

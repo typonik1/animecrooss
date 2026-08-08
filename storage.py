@@ -75,6 +75,37 @@ def clear_pending(day: str) -> int:
         db.commit()
     return result.rowcount
 
+def pending_count(day: str) -> int:
+    with _db() as db:
+        row = db.execute("SELECT COUNT(*) FROM queue WHERE day=? AND status='pending'", (day,)).fetchone()
+    return row[0]
+
+def replace_pending(day: str, items: list[dict]) -> int:
+    """Replace as many pending slots as there are new candidates, atomically."""
+    if not items:
+        return 0
+    with _db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute(
+            "SELECT id FROM queue WHERE day=? AND status='pending' ORDER BY slot", (day,)
+        ).fetchall()
+        replaced = 0
+        for (queue_id,), item in zip(rows, items):
+            result = db.execute(
+                """UPDATE queue
+                   SET source=?, message_id=?, file_uid=?, fingerprint=?, score=?,
+                       is_fallback=?, status='pending', created_at=CURRENT_TIMESTAMP
+                   WHERE id=? AND status='pending'""",
+                (
+                    item["source"], item["message_id"], item.get("file_uid", ""),
+                    item.get("fingerprint", ""), item.get("score", 0),
+                    int(item.get("is_fallback", 0)), queue_id,
+                ),
+            )
+            replaced += result.rowcount
+        db.commit()
+    return replaced
+
 def list_queue(day: str) -> list[tuple]:
     with _db() as db: return db.execute("SELECT slot,source,message_id,score,is_fallback,status FROM queue WHERE day=? ORDER BY slot", (day,)).fetchall()
 def today() -> str: return datetime.now(config.TZ).strftime("%Y-%m-%d")
