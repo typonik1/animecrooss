@@ -17,9 +17,14 @@ async def create_clients():
     return reader, bot
 
 async def notify(bot, text):
-    if config.OWNER_ID:
-        try: await bot.send_message(config.OWNER_ID, text, parse_mode="html", link_preview=False)
+    for owner_id in sorted(config.OWNER_IDS):
+        try: await bot.send_message(owner_id, text, parse_mode="html", link_preview=False)
         except Exception: pass
+
+async def add_reader_owner(reader):
+    me = await reader.get_me()
+    config.OWNER_IDS.add(me.id)
+    logging.getLogger("main").info("Владельцев настроено: %s", len(config.OWNER_IDS))
 async def scheduler(reader, bot):
     while True:
         try:
@@ -41,9 +46,6 @@ async def main():
     logging.getLogger("main").info("Health endpoint: http://0.0.0.0:%s/health", config.PORT)
     reader, bot = await create_clients()
     storage.init(); await reader.start()
-    if not config.OWNER_ID:
-        me = await reader.get_me()
-        config.OWNER_ID = me.id
-        logging.getLogger("main").info("OWNER_ID автоматически определён: %s", config.OWNER_ID)
+    await add_reader_owner(reader)
     await bot.start(bot_token=config.BOT_TOKEN); admin.register(bot,reader); await notify(bot, "Бот запущен ✅"); await builder.build_day(reader); await asyncio.gather(server.serve_forever(), scheduler(reader, bot), bot.run_until_disconnected())
 if __name__=="__main__": asyncio.run(main())

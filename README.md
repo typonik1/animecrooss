@@ -28,6 +28,12 @@ python3 -c "from telethon.sessions import SQLiteSession,StringSession; print(Str
 
 Вывод этой команды — секрет уровня пароля. Добавь его в Render → Environment под именем `TELEGRAM_SESSION_STRING`, не публикуй в Git и чатах. Также добавь `API_ID`, `API_HASH`, `BOT_TOKEN`, `ROUTERAI_API_KEY`.
 
+Дополнительных владельцев укажи в `OWNER_IDS` через запятую. Аккаунт-читатель добавляется владельцем автоматически:
+
+```text
+OWNER_IDS=123456789,987654321
+```
+
 Настройки сервиса:
 
 ```text

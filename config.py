@@ -5,6 +5,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def parse_owner_ids(value: str, legacy_value: str = "") -> set[int]:
+    parts = [part.strip() for part in f"{value},{legacy_value}".split(",")]
+    return {int(part) for part in parts if part}
+
 API_ID = int(os.getenv("API_ID", "0") or 0)
 API_HASH = os.getenv("API_HASH", "")
 SESSION_NAME = os.getenv("SESSION_NAME", "anime_reader")
@@ -12,6 +16,7 @@ TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "@anime_edit_videoo")
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+OWNER_IDS = parse_owner_ids(os.getenv("OWNER_IDS", ""), os.getenv("OWNER_ID", ""))
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
 PORT = int(os.getenv("PORT", "10000") or 10000)

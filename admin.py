@@ -1,11 +1,12 @@
 from telethon import events
 import builder, config, publisher, storage
 HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\n/set key value /config /pause /resume /id"
+def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
 def register(bot, reader):
-    def owner(event): return event.is_private and event.sender_id == config.OWNER_ID
+    def owner(event): return is_owner(event)
     @bot.on(events.NewMessage(pattern=r"^/(start|help)"))
     async def help_cmd(event):
-        if event.is_private and event.sender_id == config.OWNER_ID: await event.reply(HELP, parse_mode="html")
+        if is_owner(event): await event.reply(HELP, parse_mode="html")
         elif event.is_private: await event.reply(f"Ваш id: <code>{event.sender_id}</code>", parse_mode="html")
     @bot.on(events.NewMessage(pattern=r"^/id"))
     async def id_cmd(event): await event.reply(f"<code>{event.sender_id}</code>", parse_mode="html")
