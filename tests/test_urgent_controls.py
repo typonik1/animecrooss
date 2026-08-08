@@ -163,3 +163,14 @@ def test_queue_controls_have_refresh_button():
     button = admin.queue_controls()
     assert button.text == "🔄 Обновить очередь"
     assert button.data == b"refresh_queue"
+
+
+def test_queue_line_links_directly_to_source_message():
+    import admin
+
+    line = admin.queue_line("10:00", "@Anitik_edits", 22931, 123, 0, "pending")
+
+    assert line == (
+        '10:00 🆕 <a href="https://t.me/Anitik_edits/22931">'
+        '@Anitik_edits/22931</a> · pending'
+    )

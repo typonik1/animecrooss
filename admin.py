@@ -1,3 +1,5 @@
+from html import escape
+
 from telethon import Button, events
 import builder, config, publisher, storage
 HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
@@ -5,6 +7,15 @@ def is_owner(event): return event.is_private and event.sender_id in config.OWNER
 
 def queue_controls():
     return Button.inline("🔄 Обновить очередь", b"refresh_queue")
+
+def queue_line(slot, source, message_id, score, is_fallback, status):
+    label = f"{source}/{message_id}"
+    if source.startswith("@"):
+        username = source[1:]
+        post = f'<a href="https://t.me/{username}/{message_id}">{escape(label)}</a>'
+    else:
+        post = escape(label)
+    return f"{escape(slot)} {'🕓' if is_fallback else '🆕'} {post} · {escape(status)}"
 
 async def publish_now(reader, bot):
     items = await builder.collect(reader, 1)
@@ -56,7 +67,9 @@ def register(bot, reader):
         await event.reply("Слоты: "+storage.get("slots"))
     @bot.on(events.NewMessage(pattern=r"^/queue"))
     async def queue(event):
-        if owner(event): await event.reply("\n".join(f"{s} {'🕓' if fb else '🆕'} {src}/{mid} · {st}" for s,src,mid,score,fb,st in storage.list_queue(storage.today())) or "Очередь пуста", buttons=queue_controls())
+        if owner(event):
+            text = "\n".join(queue_line(*item) for item in storage.list_queue(storage.today())) or "Очередь пуста"
+            await event.reply(text, buttons=queue_controls(), parse_mode="html", link_preview=False)
     @bot.on(events.NewMessage(pattern=r"^/build"))
     async def build(event):
         if owner(event): await event.reply(f"Добавлено: {await builder.build_day(reader)}")
