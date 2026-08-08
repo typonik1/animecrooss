@@ -1,35 +1,124 @@
 import logging
 from datetime import datetime, timedelta, timezone
-import filters, storage
+
+import config
+import filters
+import storage
+
 log = logging.getLogger("builder")
+
+_target_history_synced = False
+
+
 def _pack(source, msg, is_fallback):
-    uid, fp = filters.fingerprint(msg)
-    return {"source":source,"message_id":msg.id,"file_uid":uid,"fingerprint":fp,"score":filters.activity_score(msg),"is_fallback":is_fallback}
+    uid, fingerprint = filters.fingerprint(msg)
+    return {
+        "source": source,
+        "message_id": msg.id,
+        "file_uid": uid,
+        "fingerprint": fingerprint,
+        "score": filters.activity_score(msg),
+        "is_fallback": is_fallback,
+    }
+
+
 async def _scan(reader, source, limit, since, fresh):
-    now = datetime.now(timezone.utc); min_age = timedelta(minutes=storage.get_int("min_age_min")); messages = await reader.get_messages(source, limit=limit)
+    now = datetime.now(timezone.utc)
+    min_age = timedelta(minutes=storage.get_int("min_age_min"))
+    messages = await reader.get_messages(source, limit=limit)
     threshold = filters.views_threshold(messages, storage.get_float("activity_multiplier")) if fresh else 0
     result = []
     for msg in messages:
-        if not msg.date or msg.date < since or now - msg.date < min_age or not filters.is_good_video(msg) or (fresh and (msg.views or 0) < threshold) or filters.looks_like_ad(msg): continue
-        uid, fp = filters.fingerprint(msg)
-        if not storage.is_used(source, msg.id, uid, fp): result.append(_pack(source, msg, 0 if fresh else 1))
+        if (
+            not msg.date
+            or msg.date < since
+            or now - msg.date < min_age
+            or not filters.is_good_video(msg)
+            or (fresh and (msg.views or 0) < threshold)
+            or filters.looks_like_ad(msg)
+        ):
+            continue
+        uid, fingerprint = filters.fingerprint(msg)
+        if not storage.is_used(source, msg.id, uid, fingerprint):
+            result.append(_pack(source, msg, 0 if fresh else 1))
     return result
+
+
+def balanced_select(groups: dict[str, list[dict]], need: int) -> list[dict]:
+    """Take the most active eligible item from each source in rotation."""
+    ranked = {
+        source: sorted(items, key=lambda item: item["score"], reverse=True)
+        for source, items in groups.items()
+    }
+    selected = []
+    while len(selected) < need:
+        added = False
+        for source in groups:
+            if not ranked[source]:
+                continue
+            selected.append(ranked[source].pop(0))
+            added = True
+            if len(selected) == need:
+                break
+        if not added:
+            break
+    return selected
+
+
+async def sync_target_history(reader, limit: int | None = None) -> int:
+    """Restore duplicate protection from recent video messages in the target."""
+    limit = limit or storage.get_int("target_scan_limit")
+    messages = await reader.get_messages(config.TARGET_CHANNEL, limit=limit)
+    imported = 0
+    for message in messages:
+        if not filters.get_video(message):
+            continue
+        _, fingerprint = filters.fingerprint(message)
+        if not fingerprint:
+            continue
+        storage.mark_posted("__target__", message.id, "", fingerprint)
+        imported += 1
+    log.info("Загружено отпечатков из целевого канала: %s", imported)
+    return imported
+
+
+async def ensure_target_history_synced(reader) -> None:
+    global _target_history_synced
+    if _target_history_synced:
+        return
+    try:
+        await sync_target_history(reader)
+    except Exception as exc:
+        log.error("Не удалось загрузить историю целевого канала: %s", exc)
+    finally:
+        _target_history_synced = True
+
+
 async def collect(reader, need):
-    now = datetime.now(timezone.utc); sources = storage.get_list("sources"); candidates = []
+    await ensure_target_history_synced(reader)
+    now = datetime.now(timezone.utc)
+    sources = storage.get_list("sources")
+    candidates = {}
     for source in sources:
-        try: candidates += await _scan(reader, source, storage.get_int("scan_limit"), now-timedelta(days=7), True)
-        except Exception as exc: log.error("Ошибка чтения %s: %s", source, exc)
-    candidates.sort(key=lambda item:item["score"], reverse=True)
-    if len(candidates) >= need: return candidates[:need]
-    archive = []
-    for source in sources:
-        try: archive += await _scan(reader, source, storage.get_int("deep_limit"), now-timedelta(days=storage.get_int("fallback_days")), False)
-        except Exception as exc: log.error("Ошибка чтения %s: %s", source, exc)
-    seen = {(x["source"],x["message_id"]) for x in candidates}; archive = [x for x in archive if (x["source"],x["message_id"]) not in seen]; archive.sort(key=lambda x:x["score"], reverse=True)
-    return (candidates + archive)[:need]
+        try:
+            candidates[source] = await _scan(
+                reader,
+                source,
+                storage.get_int("scan_limit"),
+                now - timedelta(days=storage.get_int("fresh_days")),
+                True,
+            )
+        except Exception as exc:
+            log.error("Ошибка чтения %s: %s", source, exc)
+    return balanced_select(candidates, need)
+
+
 async def build_day(reader, day=None):
-    day = day or storage.today(); empty = storage.free_slots(day, storage.get_list("slots"))
-    if not empty: return 0
+    day = day or storage.today()
+    empty = storage.free_slots(day, storage.get_list("slots"))
+    if not empty:
+        return 0
     items = await collect(reader, len(empty))
-    for slot, item in zip(empty, items): storage.enqueue(day, slot, item)
+    for slot, item in zip(empty, items):
+        storage.enqueue(day, slot, item)
     return len(items)

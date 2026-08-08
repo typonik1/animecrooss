@@ -26,12 +26,15 @@ ROUTERAI_MODEL = os.getenv("ROUTERAI_MODEL", os.getenv("GEMINI_MODEL", "google/g
 ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", os.getenv("GEMINI_BASE_URL", "https://routerai.ru/api/v1"))
 TZ = ZoneInfo("Europe/Moscow")
 BUILD_AT = "08:00"
-SIGNATURE = "#аниме #анимеэдит #anime #amv #animeedit"
+SIGNATURE = (
+    "#аниме #анимеэдит #anime #amv #animeedit\n"
+    '<a href="https://t.me/NosokVPNBot?start=partner_8235497168">Лучший VPN</a>'
+)
 DEFAULTS = {
     "slots": "10:00,13:00,18:00,21:00",
     "sources": "@Anitik_edits,@AnWordX,@AniZedEdits",
-    "activity_multiplier": "1.3", "scan_limit": "120", "deep_limit": "1500",
-    "fallback_days": "120", "min_age_min": "90", "min_sec": "5",
+    "activity_multiplier": "1.3", "scan_limit": "120", "fresh_days": "7",
+    "target_scan_limit": "1000", "min_age_min": "90", "min_sec": "5",
     "max_sec": "240", "max_mb": "48", "moderation": "0", "enabled": "1",
 }
 EMOJI_POOL = ["⚔️", "🔥", "🌸", "🩸", "🌙", "⚡", "🖤", "❄️", "🌊", "👺", "🎴", "💫"]
