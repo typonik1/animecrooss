@@ -15,3 +15,25 @@
 RouterAI подключается через OpenAI-совместимый API (`ROUTERAI_API_KEY`, `ROUTERAI_MODEL`, `ROUTERAI_BASE_URL`). Если API недоступен, используется локальный разбор подписей.
 
 Чужие эдиты могут быть защищены авторским правом — сохраняй кредит автора и публикуй только контент, на который есть разрешение.
+
+## Render Free Web Service
+
+Render запускает проект как Web Service с `python3 main.py`; `/health` используется для health check и внешнего uptime-монитора. Python закреплён на версии 3.13.
+
+Сначала на локальном компьютере, где уже авторизован аккаунт-читатель, получи переносимую сессию:
+
+```bash
+python3 -c "from telethon.sessions import SQLiteSession,StringSession; print(StringSession.save(SQLiteSession('anime_reader')))"
+```
+
+Вывод этой команды — секрет уровня пароля. Добавь его в Render → Environment под именем `TELEGRAM_SESSION_STRING`, не публикуй в Git и чатах. Также добавь `API_ID`, `API_HASH`, `BOT_TOKEN`, `ROUTERAI_API_KEY`.
+
+Настройки сервиса:
+
+```text
+Build Command: pip install -r requirements.txt
+Start Command: python3 main.py
+Health Check Path: /health
+```
+
+В UptimeRobot создай HTTP(S)-монитор для `https://<имя-сервиса>.onrender.com/health` с интервалом 5–10 минут. На Free Web Service локальные `bot.db` и файлы очереди сбрасываются при redeploy или restart, поэтому возможна повторная подборка старых постов.

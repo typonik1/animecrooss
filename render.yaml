@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: animecrooss
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 main.py
+    healthCheckPath: /health
+    envVars:
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_SESSION_STRING
+        sync: false
+      - key: ROUTERAI_API_KEY
+        sync: false
+      - key: TARGET_CHANNEL
+        value: "@anime_edit_videoo"
+      - key: ROUTERAI_MODEL
+        value: google/gemini-3.1-flash-lite
+      - key: ROUTERAI_BASE_URL
+        value: https://routerai.ru/api/v1
