@@ -18,7 +18,15 @@ async def publish(reader, bot, item, queue_id=None) -> bool:
         if queue_id is not None: storage.set_status(queue_id, "failed")
         return False
     try:
-        await bot.send_file(config.TARGET_CHANNEL, path, caption=enrich.build_caption(parsed["anime"], parsed["track"]), parse_mode="html", supports_streaming=True, link_preview=False)
+        await bot.send_file(
+            config.TARGET_CHANNEL,
+            path,
+            caption=enrich.build_caption(parsed["anime"], parsed["track"]),
+            parse_mode="html",
+            attributes=filters.upload_attributes(msg),
+            supports_streaming=True,
+            link_preview=False,
+        )
         if queue_id is not None: storage.set_status(queue_id, "posted")
         storage.mark_posted(item["source"], msg.id, item["file_uid"], item["fingerprint"]); return True
     except Exception:

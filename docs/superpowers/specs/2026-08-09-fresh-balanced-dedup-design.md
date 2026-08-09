@@ -10,7 +10,7 @@ Only messages from the last seven days are eligible. Each source is filtered by 
 
 ## Restart-safe deduplication
 
-At process startup, the reader scans recent video posts in the target channel and imports their media fingerprints into SQLite. This reconstructs deduplication after Render replaces its ephemeral filesystem. A fingerprint uses exact byte size, duration, width, and height. If the target history cannot be read, the bot logs the error and keeps the in-process SQLite safeguard.
+At process startup, the reader scans recent video posts in the target channel and imports their media fingerprints into SQLite. This reconstructs deduplication after Render replaces its ephemeral filesystem. A fingerprint uses exact byte size, because Telegram changes the document id and may lose duration, width, and height when a bot reuploads the same file. The publisher explicitly preserves the source video attributes on new uploads. If the target history cannot be read, the bot logs the error and keeps the in-process SQLite safeguard.
 
 ## Caption
 

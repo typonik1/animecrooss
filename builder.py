@@ -86,7 +86,10 @@ async def sync_target_history(reader, limit: int | None = None) -> int:
             continue
         storage.mark_posted("__target__", message.id, "", fingerprint)
         imported += 1
+    removed = storage.clear_used_pending()
     log.info("Загружено отпечатков из целевого канала: %s", imported)
+    if removed:
+        log.info("Удалено ожидающих дублей после сверки с целевым каналом: %s", removed)
     return imported
 
 
@@ -122,6 +125,7 @@ async def collect(reader, need):
 
 
 async def build_day(reader, day=None):
+    await ensure_target_history_synced(reader)
     day = day or storage.today()
     empty = storage.free_slots(day, storage.get_list("slots"))
     if not empty:

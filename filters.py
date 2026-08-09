@@ -28,8 +28,30 @@ def is_good_video(message) -> bool:
 def fingerprint(message) -> tuple[str, str]:
     found = get_video(message)
     if not found: return "", ""
-    doc, attr = found
-    return str(doc.id), f"{doc.size}:{int(attr.duration)}:{attr.w}x{attr.h}"
+    doc, _ = found
+    # Telegram assigns a new document id when the bot uploads the file and may
+    # also lose duration/dimensions.  The exact byte size survives the upload,
+    # so it is the stable metadata available without downloading every video.
+    return str(doc.id), f"size:{doc.size}"
+
+def upload_attributes(message) -> list:
+    """Preserve source video metadata when the bot uploads a downloaded file."""
+    found = get_video(message)
+    if not found:
+        return []
+    _, video = found
+    attributes = [
+        DocumentAttributeVideo(
+            duration=video.duration,
+            w=video.w,
+            h=video.h,
+            supports_streaming=True,
+        )
+    ]
+    filename = file_name_of(message)
+    if filename:
+        attributes.append(DocumentAttributeFilename(filename))
+    return attributes
 def reactions_count(message) -> int:
     reactions = getattr(message, "reactions", None)
     return sum(r.count for r in (getattr(reactions, "results", None) or [])) if reactions else 0

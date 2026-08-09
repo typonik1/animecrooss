@@ -49,6 +49,7 @@ def test_target_history_imports_video_fingerprints(monkeypatch):
     monkeypatch.setattr(builder.filters, "fingerprint", lambda msg: ("ignored", "fp-11"))
     marked = []
     monkeypatch.setattr(builder.storage, "mark_posted", lambda source, mid, uid, fp: marked.append((source, mid, uid, fp)))
+    monkeypatch.setattr(builder.storage, "clear_used_pending", lambda: 0)
 
     count = asyncio.run(builder.sync_target_history(Reader(), limit=500))
     assert count == 1

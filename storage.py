@@ -24,7 +24,22 @@ def init() -> None:
     with _db() as db:
         db.executescript(SCHEMA)
         db.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", config.DEFAULTS.items())
+        _migrate_fingerprints(db)
         db.commit()
+
+def _migrate_fingerprints(db) -> None:
+    """Convert the old size:duration:resolution fingerprint to stable size-only form."""
+    for table in ("posted", "queue"):
+        rows = db.execute(f"SELECT rowid,fingerprint FROM {table} WHERE fingerprint!=''").fetchall()
+        updates = []
+        for rowid, fingerprint in rows:
+            if fingerprint.startswith("size:"):
+                continue
+            size = fingerprint.split(":", 1)[0]
+            if size.isdigit():
+                updates.append((f"size:{size}", rowid))
+        if updates:
+            db.executemany(f"UPDATE {table} SET fingerprint=? WHERE rowid=?", updates)
 
 def get(key: str, default: str = "") -> str:
     with _db() as db:
@@ -105,6 +120,21 @@ def replace_pending(day: str, items: list[dict]) -> int:
             replaced += result.rowcount
         db.commit()
     return replaced
+
+def clear_used_pending() -> int:
+    """Drop pending entries that target-history restoration proves were posted."""
+    with _db() as db:
+        result = db.execute(
+            """DELETE FROM queue
+               WHERE status='pending' AND EXISTS (
+                   SELECT 1 FROM posted
+                   WHERE (posted.source=queue.source AND posted.message_id=queue.message_id)
+                      OR (posted.file_uid!='' AND posted.file_uid=queue.file_uid)
+                      OR (posted.fingerprint!='' AND posted.fingerprint=queue.fingerprint)
+               )"""
+        )
+        db.commit()
+    return result.rowcount
 
 def list_queue(day: str) -> list[tuple]:
     with _db() as db: return db.execute("SELECT slot,source,message_id,score,is_fallback,status FROM queue WHERE day=? ORDER BY slot", (day,)).fetchall()

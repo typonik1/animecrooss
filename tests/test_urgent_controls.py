@@ -63,6 +63,7 @@ def test_publisher_does_not_update_queue_for_urgent_item(tmp_path, monkeypatch):
     monkeypatch.setattr(publisher.filters, "get_video", lambda msg: object())
     monkeypatch.setattr(publisher.filters, "file_name_of", lambda msg: "")
     monkeypatch.setattr(publisher.filters, "looks_like_ad", lambda msg: False)
+    monkeypatch.setattr(publisher.filters, "upload_attributes", lambda msg: ["video-attributes"])
     async def parse_caption(text, filename):
         return {"anime": "", "track": "", "ad": False}
     monkeypatch.setattr(publisher.enrich, "parse_caption", parse_caption)
