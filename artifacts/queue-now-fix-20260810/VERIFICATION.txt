@@ -1,0 +1,50 @@
+﻿TARGET: anime Telegram bot queue and /now selection
+BRANCH: main
+CHANGED_FIELDS: fresh eligibility gate; activity ranking; pending fingerprint deduplication; in-batch fingerprint deduplication; empty-queue refresh; remaining-today slots; /set usage handler
+
+ARTIFACTS:
+MODIFIED_FILE: C:\BOTS\аниме\artifacts\queue-now-fix-20260810\MODIFIED_FILE.py
+DIFF_FILE: C:\BOTS\аниме\artifacts\queue-now-fix-20260810\DIFF_FILE.patch
+VERIFICATION: C:\BOTS\аниме\artifacts\queue-now-fix-20260810\VERIFICATION.txt
+ROLLBACK: C:\BOTS\аниме\artifacts\queue-now-fix-20260810\ROLLBACK.sh
+
+ORIGINAL_HASH:
+builder.py SHA256 2D4444FEF7E439A60799823097EEB3B07AF87C69AB6ACCF2037362F0F1C4A88F
+MODIFIED_HASH:
+MODIFIED_FILE.py SHA256 80D4471E27DCAE467C4F31DFE904D7063471A2253D3D307F3A8BD624E14E3BB3
+
+BASELINE:
+COMMAND: python -m pytest -q
+INPUT: original main@5915f96 working files admin.py, builder.py, storage.py, tests/test_builder_selection.py, tests/test_storage_filters.py, tests/test_urgent_controls.py
+LITERAL_OUTPUT:
+.............................                                            [100%]
+29 passed in 10.88s
+EXIT_STATUS: 0
+RESULT: original test suite passed, while live diagnostics returned zero selectable candidates because the activity threshold rejected fresh unique videos.
+
+MODIFIED:
+COMMAND: python -m pytest -q
+INPUT: modified working files on branch main
+LITERAL_OUTPUT:
+..................................                                       [100%]
+34 passed in 9.56s
+EXIT_STATUS: 0
+RESULT: all tests passed; live target-history scan returned 8 candidates with 8 unique fingerprints and now_candidate_available=True.
+
+ROLLBACK:
+COMMAND: "C:\Program Files\Git\bin\bash.exe" "C:\BOTS\аниме\artifacts\queue-now-fix-20260810\ROLLBACK.sh" "C:\Users\USER\AppData\Local\Temp\anime-rollback-verification-d2ff91ef95d44902ba90a9356e199f6b"
+INPUT: separate modified copy at C:\Users\USER\AppData\Local\Temp\anime-rollback-verification-d2ff91ef95d44902ba90a9356e199f6b
+LITERAL_OUTPUT:
+admin.py RESTORED E9106D221C3BA7D81EDCFC0A6CD223517B03B475593C153182AC2F7645D53A0C
+builder.py RESTORED 2D4444FEF7E439A60799823097EEB3B07AF87C69AB6ACCF2037362F0F1C4A88F
+storage.py RESTORED 0D6A28D8E573FAAD6E5C24BC79526ED3799EBA0E224AE3790F3D296A4BA34923
+tests\test_builder_selection.py RESTORED 12F664DCBA073BBAD95B7D3DA7E168D1623559E1A02509F83EE22EBF6EFB23A5
+tests\test_storage_filters.py RESTORED 0EE3EA2C849566852F2B5C0D1883ABBD2E004AC333A02549E4343E588E276BDA
+tests\test_urgent_controls.py RESTORED 8A4539259B2B1361ED8F899D8B8CEA60E9402CA9C37E666CF3C27DF786CA822C
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR_STATUS: the separate rollback copy exactly matches all six original SHA256 hashes; the workspace remains on the modified behavior.
+
+LIVE_VERIFICATION:
+COMMAND: temporary clean SQLite DB + target history sync + builder.collect(reader, 8)
+LITERAL_RESULT: {'fresh_unique_count_returned': 8, 'unique_fingerprint_count': 8, 'now_candidate_available': True, 'selection': [('@Anitik_edits', 22932), ('@AnWordX', 7405), ('@AniZedEdits', 8934), ('@Anitik_edits', 22934), ('@AnWordX', 7402), ('@AniZedEdits', 8933), ('@Anitik_edits', 22939), ('@AnWordX', 7406)]}
+EXIT_STATUS: 0

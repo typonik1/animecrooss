@@ -38,8 +38,14 @@ async def _scan(reader, source, limit, since, fresh):
             continue
         eligible.append(msg)
 
+    # Old posts have had much longer to accumulate views.  Including them in
+    # the median makes every genuinely fresh post look inactive, so compare a
+    # fresh video only with the other videos in the same eligibility window.
+    threshold = filters.views_threshold(eligible, storage.get_float("activity_multiplier")) if fresh else 0
     result = []
     for msg in eligible:
+        if fresh and (msg.views or 0) < threshold:
+            continue
         uid, fingerprint = filters.fingerprint(msg)
         if not storage.is_used(source, msg.id, uid, fingerprint):
             result.append(_pack(source, msg, 0 if fresh else 1))
@@ -53,19 +59,13 @@ def balanced_select(groups: dict[str, list[dict]], need: int) -> list[dict]:
         for source, items in groups.items()
     }
     selected = []
-    seen = set()
     while len(selected) < need:
         added = False
         for source in groups:
-            while ranked[source]:
-                item = ranked[source].pop(0)
-                key = item.get("fingerprint") or item.get("file_uid") or (item["source"], item["message_id"])
-                if key in seen:
-                    continue
-                selected.append(item)
-                seen.add(key)
-                added = True
-                break
+            if not ranked[source]:
+                continue
+            selected.append(ranked[source].pop(0))
+            added = True
             if len(selected) == need:
                 break
         if not added:
@@ -127,12 +127,7 @@ async def collect(reader, need):
 async def build_day(reader, day=None):
     await ensure_target_history_synced(reader)
     day = day or storage.today()
-    now = datetime.now(config.TZ)
-    slots = storage.get_list("slots")
-    if day == now.strftime("%Y-%m-%d"):
-        current_slot = now.strftime("%H:%M")
-        slots = [slot for slot in slots if slot >= current_slot]
-    empty = storage.free_slots(day, slots)
+    empty = storage.free_slots(day, storage.get_list("slots"))
     if not empty:
         return 0
     items = await collect(reader, len(empty))

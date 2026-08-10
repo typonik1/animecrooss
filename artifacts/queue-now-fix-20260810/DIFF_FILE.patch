@@ -1,0 +1,312 @@
+﻿diff --git a/admin.py b/admin.py
+index 80cff97..b40dd78 100644
+--- a/admin.py
++++ b/admin.py
+@@ -3,6 +3,7 @@ from html import escape
+ from telethon import Button, events
+ import builder, config, publisher, storage
+ HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
++SET_USAGE = "Использование: /set параметр значение\nПараметры: " + ", ".join(config.DEFAULTS)
+ def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
+ 
+ def queue_controls():
+@@ -26,15 +27,15 @@ async def publish_now(reader, bot):
+ async def refresh_queue(reader):
+     day = storage.today()
+     pending = storage.pending_count(day)
+-    if not pending:
+-        return 0, 0
+-    # Collect while the current pending rows still exist.  This both excludes
+-    # the old selections and lets us keep them if no replacements are found.
+-    items = await builder.collect(reader, pending)
+-    if not items:
+-        return 0, 0
+-    replaced = storage.replace_pending(day, items)
+-    return replaced, replaced
++    replaced = 0
++    if pending:
++        # Collect while the current pending rows still exist.  This both
++        # excludes old selections and preserves them if replacements run out.
++        items = await builder.collect(reader, pending)
++        if items:
++            replaced = storage.replace_pending(day, items)
++    filled = await builder.build_day(reader, day)
++    return replaced, replaced + filled
+ 
+ def register(bot, reader):
+     def owner(event): return is_owner(event)
+@@ -90,12 +91,18 @@ def register(bot, reader):
+         removed, added = await refresh_queue(reader)
+         await event.answer("Очередь обновлена", alert=False)
+         await event.edit(f"Очередь обновлена: удалено {removed}, добавлено {added}", buttons=queue_controls())
+-    @bot.on(events.NewMessage(pattern=r"^/set\s+(\w+)\s+(.+)"))
++    @bot.on(events.NewMessage(pattern=r"^/set(?:\s+(\w+)(?:\s+(.+))?)?$"))
+     async def setting(event):
+-        if owner(event):
+-            key,value=event.pattern_match.group(1),event.pattern_match.group(2).strip()
+-            if key in config.DEFAULTS: storage.set_value(key,value); await event.reply(f"{key} = {value}")
+-            else: await event.reply("Неизвестный параметр")
++        if not owner(event): return
++        key, value = event.pattern_match.group(1), event.pattern_match.group(2)
++        if not key or value is None:
++            await event.reply(SET_USAGE)
++        elif key in config.DEFAULTS:
++            value = value.strip()
++            storage.set_value(key, value)
++            await event.reply(f"{key} = {value}")
++        else:
++            await event.reply("Неизвестный параметр\n" + SET_USAGE)
+     @bot.on(events.NewMessage(pattern=r"^/config"))
+     async def settings(event):
+         if owner(event): await event.reply("\n".join(f"{k} = {storage.get(k)}" for k in config.DEFAULTS))
+diff --git a/builder.py b/builder.py
+index 802d91a..4c96eaa 100644
+--- a/builder.py
++++ b/builder.py
+@@ -38,14 +38,8 @@ async def _scan(reader, source, limit, since, fresh):
+             continue
+         eligible.append(msg)
+ 
+-    # Old posts have had much longer to accumulate views.  Including them in
+-    # the median makes every genuinely fresh post look inactive, so compare a
+-    # fresh video only with the other videos in the same eligibility window.
+-    threshold = filters.views_threshold(eligible, storage.get_float("activity_multiplier")) if fresh else 0
+     result = []
+     for msg in eligible:
+-        if fresh and (msg.views or 0) < threshold:
+-            continue
+         uid, fingerprint = filters.fingerprint(msg)
+         if not storage.is_used(source, msg.id, uid, fingerprint):
+             result.append(_pack(source, msg, 0 if fresh else 1))
+@@ -59,13 +53,19 @@ def balanced_select(groups: dict[str, list[dict]], need: int) -> list[dict]:
+         for source, items in groups.items()
+     }
+     selected = []
++    seen = set()
+     while len(selected) < need:
+         added = False
+         for source in groups:
+-            if not ranked[source]:
+-                continue
+-            selected.append(ranked[source].pop(0))
+-            added = True
++            while ranked[source]:
++                item = ranked[source].pop(0)
++                key = item.get("fingerprint") or item.get("file_uid") or (item["source"], item["message_id"])
++                if key in seen:
++                    continue
++                selected.append(item)
++                seen.add(key)
++                added = True
++                break
+             if len(selected) == need:
+                 break
+         if not added:
+@@ -127,7 +127,12 @@ async def collect(reader, need):
+ async def build_day(reader, day=None):
+     await ensure_target_history_synced(reader)
+     day = day or storage.today()
+-    empty = storage.free_slots(day, storage.get_list("slots"))
++    now = datetime.now(config.TZ)
++    slots = storage.get_list("slots")
++    if day == now.strftime("%Y-%m-%d"):
++        current_slot = now.strftime("%H:%M")
++        slots = [slot for slot in slots if slot >= current_slot]
++    empty = storage.free_slots(day, slots)
+     if not empty:
+         return 0
+     items = await collect(reader, len(empty))
+diff --git a/storage.py b/storage.py
+index c543b6e..48f6aaa 100644
+--- a/storage.py
++++ b/storage.py
+@@ -59,7 +59,15 @@ def is_used(source: str, message_id: int, file_uid: str = "", fingerprint: str =
+     with _db() as db:
+         row = db.execute("SELECT 1 FROM posted WHERE (source=? AND message_id=?) OR (file_uid!='' AND file_uid=?) OR (fingerprint!='' AND fingerprint=?) LIMIT 1", (source, message_id, file_uid, fingerprint)).fetchone()
+         if row: return True
+-        row = db.execute("SELECT 1 FROM queue WHERE status IN ('pending','posted') AND ((source=? AND message_id=?) OR (file_uid!='' AND file_uid=?)) LIMIT 1", (source, message_id, file_uid)).fetchone()
++        row = db.execute(
++            """SELECT 1 FROM queue
++               WHERE status IN ('pending','posted') AND (
++                   (source=? AND message_id=?)
++                   OR (file_uid!='' AND file_uid=?)
++                   OR (fingerprint!='' AND fingerprint=?)
++               ) LIMIT 1""",
++            (source, message_id, file_uid, fingerprint),
++        ).fetchone()
+     return row is not None
+ 
+ def mark_posted(source: str, message_id: int, file_uid: str, fingerprint: str) -> None:
+@@ -71,7 +79,9 @@ def enqueue(day: str, slot: str, item: dict) -> None:
+         db.execute("INSERT OR REPLACE INTO queue(day,slot,source,message_id,file_uid,fingerprint,score,is_fallback,status) VALUES (?,?,?,?,?,?,?,?,'pending')", (day, slot, item['source'], item['message_id'], item.get('file_uid',''), item.get('fingerprint',''), item.get('score',0), int(item.get('is_fallback',0)))); db.commit()
+ 
+ def free_slots(day: str, slots: list[str]) -> list[str]:
+-    with _db() as db: taken = {r[0] for r in db.execute("SELECT slot FROM queue WHERE day=? AND status IN ('pending','posted')", (day,))}
++    # Every existing row is history for that slot.  Reusing skipped/failed
++    # slots through INSERT OR REPLACE would silently destroy that history.
++    with _db() as db: taken = {r[0] for r in db.execute("SELECT slot FROM queue WHERE day=?", (day,))}
+     return [slot for slot in slots if slot not in taken]
+ 
+ def take_slot(day: str, slot: str) -> dict | None:
+diff --git a/tests/test_builder_selection.py b/tests/test_builder_selection.py
+index 74ccd88..1ea646a 100644
+--- a/tests/test_builder_selection.py
++++ b/tests/test_builder_selection.py
+@@ -21,6 +21,22 @@ def test_balanced_select_rotates_sources_and_keeps_activity_order():
+     ]
+ 
+ 
++def test_balanced_select_deduplicates_same_video_across_sources():
++    groups = {
++        "@a": [dict(item("@a", 100, 1), fingerprint="size:1000")],
++        "@b": [
++            dict(item("@b", 90, 2), fingerprint="size:1000"),
++            dict(item("@b", 80, 3), fingerprint="size:2000"),
++        ],
++    }
++
++    selected = builder.balanced_select(groups, 3)
++
++    assert [(candidate["source"], candidate["message_id"]) for candidate in selected] == [
++        ("@a", 1), ("@b", 3)
++    ]
++
++
+ def test_collect_never_requests_archive_scan(monkeypatch):
+     monkeypatch.setattr(builder.storage, "get_list", lambda key: ["@a", "@b"])
+     monkeypatch.setattr(builder.storage, "get_int", lambda key: 120)
+@@ -56,7 +72,7 @@ def test_target_history_imports_video_fingerprints(monkeypatch):
+     assert marked == [("__target__", 11, "", "fp-11")]
+ 
+ 
+-def test_scan_activity_threshold_ignores_old_popular_posts(monkeypatch):
++def test_scan_keeps_all_fresh_unique_posts_and_leaves_activity_for_ranking(monkeypatch):
+     now = datetime.now(timezone.utc)
+     old = [SimpleNamespace(id=i, date=now - timedelta(days=30), views=10_000) for i in range(5)]
+     fresh = [
+@@ -73,11 +89,34 @@ def test_scan_activity_threshold_ignores_old_popular_posts(monkeypatch):
+     monkeypatch.setattr(builder.filters, "fingerprint", lambda msg: (f"uid-{msg.id}", f"fp-{msg.id}"))
+     monkeypatch.setattr(builder.filters, "activity_score", lambda msg: msg.views)
+     monkeypatch.setattr(builder.storage, "get_int", lambda key: 90)
+-    monkeypatch.setattr(builder.storage, "get_float", lambda key: 1.3)
+     monkeypatch.setattr(builder.storage, "is_used", lambda *args: False)
+ 
+     result = asyncio.run(
+         builder._scan(Reader(), "@source", 120, now - timedelta(days=7), True)
+     )
+ 
+-    assert [item["message_id"] for item in result] == [103, 104]
++    assert [item["message_id"] for item in result] == [100, 101, 102, 103, 104]
++
++
++def test_build_day_uses_only_remaining_today_slots(monkeypatch):
++    class FixedDateTime:
++        @classmethod
++        def now(cls, tz):
++            return datetime(2026, 8, 10, 17, 41, tzinfo=tz)
++
++    monkeypatch.setattr(builder, "datetime", FixedDateTime)
++    monkeypatch.setattr(builder.storage, "get_list", lambda key: ["10:00", "13:00", "18:00", "21:00"])
++    monkeypatch.setattr(builder.storage, "free_slots", lambda day, slots: slots)
++    monkeypatch.setattr(builder.storage, "enqueue", lambda *args: None)
++
++    async def synced(reader):
++        return None
++
++    async def collect(reader, need):
++        assert need == 2
++        return []
++
++    monkeypatch.setattr(builder, "ensure_target_history_synced", synced)
++    monkeypatch.setattr(builder, "collect", collect)
++
++    assert asyncio.run(builder.build_day(object(), "2026-08-10")) == 0
+diff --git a/tests/test_storage_filters.py b/tests/test_storage_filters.py
+index 2a6bdd2..30e7344 100644
+--- a/tests/test_storage_filters.py
++++ b/tests/test_storage_filters.py
+@@ -5,6 +5,20 @@ def test_settings_and_dedup(tmp_path, monkeypatch):
+     monkeypatch.setattr(config,"DB_PATH",str(tmp_path/"test.db")); import storage; importlib.reload(storage); storage.init()
+     assert storage.get("enabled")=="1"; assert not storage.is_used("@x",1,"u","f")
+     storage.mark_posted("@x",1,"u","f"); assert storage.is_used("@x",2,"u","")
++
++def test_pending_fingerprint_blocks_same_video_from_another_source(tmp_path, monkeypatch):
++    import config
++    import storage
++
++    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "pending-dedup.db"))
++    importlib.reload(storage)
++    storage.init()
++    storage.enqueue(
++        "2026-08-10", "18:00",
++        {"source": "@a", "message_id": 1, "file_uid": "uid-a", "fingerprint": "size:12345"},
++    )
++
++    assert storage.is_used("@b", 2, "uid-b", "size:12345")
+ def test_ad_detection():
+     import filters
+     assert filters.looks_like_ad(SimpleNamespace(message="Реклама, промокод https://x", fwd_from=None, reply_markup=None))
+diff --git a/tests/test_urgent_controls.py b/tests/test_urgent_controls.py
+index aaecc85..d7c1978 100644
+--- a/tests/test_urgent_controls.py
++++ b/tests/test_urgent_controls.py
+@@ -106,11 +106,16 @@ def test_refresh_replaces_pending_only_after_new_items_are_collected(monkeypatch
+         "replace_pending",
+         lambda day, items: calls.append(("replace", day, items)) or len(items),
+     )
++    async def build_day(reader, day):
++        calls.append(("build", reader, day))
++        return 0
++    monkeypatch.setattr(admin.builder, "build_day", build_day)
+     assert asyncio.run(admin.refresh_queue("reader")) == (2, 2)
+     assert calls == [
+         ("count", "2026-08-09"),
+         ("collect", "reader", 2),
+         ("replace", "2026-08-09", [{"message_id": 1}, {"message_id": 2}]),
++        ("build", "reader", "2026-08-09"),
+     ]
+ 
+ 
+@@ -124,6 +129,9 @@ def test_refresh_keeps_pending_when_no_replacements_exist(monkeypatch):
+         return []
+ 
+     monkeypatch.setattr(admin.builder, "collect", collect)
++    async def build_day(reader, day):
++        return 0
++    monkeypatch.setattr(admin.builder, "build_day", build_day)
+     replaced = []
+     monkeypatch.setattr(admin.storage, "replace_pending", lambda *args: replaced.append(args))
+ 
+@@ -131,6 +139,21 @@ def test_refresh_keeps_pending_when_no_replacements_exist(monkeypatch):
+     assert replaced == []
+ 
+ 
++def test_refresh_builds_empty_queue(monkeypatch):
++    import admin
++
++    monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-10")
++    monkeypatch.setattr(admin.storage, "pending_count", lambda day: 0)
++
++    async def build_day(reader, day):
++        assert day == "2026-08-10"
++        return 2
++
++    monkeypatch.setattr(admin.builder, "build_day", build_day)
++
++    assert asyncio.run(admin.refresh_queue("reader")) == (0, 2)
++
++
+ def test_replace_pending_keeps_unreplaced_slots_and_history(tmp_path, monkeypatch):
+     import config
+ 
+@@ -175,3 +198,10 @@ def test_queue_line_links_directly_to_source_message():
+         '10:00 🆕 <a href="https://t.me/Anitik_edits/22931">'
+         '@Anitik_edits/22931</a> · pending'
+     )
++
++
++def test_set_without_arguments_has_usage_text():
++    import admin
++
++    assert admin.SET_USAGE.startswith("Использование: /set параметр значение")
++    assert "fresh_days" in admin.SET_USAGE

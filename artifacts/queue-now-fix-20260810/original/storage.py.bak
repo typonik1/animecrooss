@@ -59,15 +59,7 @@ def is_used(source: str, message_id: int, file_uid: str = "", fingerprint: str =
     with _db() as db:
         row = db.execute("SELECT 1 FROM posted WHERE (source=? AND message_id=?) OR (file_uid!='' AND file_uid=?) OR (fingerprint!='' AND fingerprint=?) LIMIT 1", (source, message_id, file_uid, fingerprint)).fetchone()
         if row: return True
-        row = db.execute(
-            """SELECT 1 FROM queue
-               WHERE status IN ('pending','posted') AND (
-                   (source=? AND message_id=?)
-                   OR (file_uid!='' AND file_uid=?)
-                   OR (fingerprint!='' AND fingerprint=?)
-               ) LIMIT 1""",
-            (source, message_id, file_uid, fingerprint),
-        ).fetchone()
+        row = db.execute("SELECT 1 FROM queue WHERE status IN ('pending','posted') AND ((source=? AND message_id=?) OR (file_uid!='' AND file_uid=?)) LIMIT 1", (source, message_id, file_uid)).fetchone()
     return row is not None
 
 def mark_posted(source: str, message_id: int, file_uid: str, fingerprint: str) -> None:
@@ -79,9 +71,7 @@ def enqueue(day: str, slot: str, item: dict) -> None:
         db.execute("INSERT OR REPLACE INTO queue(day,slot,source,message_id,file_uid,fingerprint,score,is_fallback,status) VALUES (?,?,?,?,?,?,?,?,'pending')", (day, slot, item['source'], item['message_id'], item.get('file_uid',''), item.get('fingerprint',''), item.get('score',0), int(item.get('is_fallback',0)))); db.commit()
 
 def free_slots(day: str, slots: list[str]) -> list[str]:
-    # Every existing row is history for that slot.  Reusing skipped/failed
-    # slots through INSERT OR REPLACE would silently destroy that history.
-    with _db() as db: taken = {r[0] for r in db.execute("SELECT slot FROM queue WHERE day=?", (day,))}
+    with _db() as db: taken = {r[0] for r in db.execute("SELECT slot FROM queue WHERE day=? AND status IN ('pending','posted')", (day,))}
     return [slot for slot in slots if slot not in taken]
 
 def take_slot(day: str, slot: str) -> dict | None:

@@ -3,7 +3,6 @@ from html import escape
 from telethon import Button, events
 import builder, config, publisher, storage
 HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
-SET_USAGE = "Использование: /set параметр значение\nПараметры: " + ", ".join(config.DEFAULTS)
 def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
 
 def queue_controls():
@@ -27,15 +26,15 @@ async def publish_now(reader, bot):
 async def refresh_queue(reader):
     day = storage.today()
     pending = storage.pending_count(day)
-    replaced = 0
-    if pending:
-        # Collect while the current pending rows still exist.  This both
-        # excludes old selections and preserves them if replacements run out.
-        items = await builder.collect(reader, pending)
-        if items:
-            replaced = storage.replace_pending(day, items)
-    filled = await builder.build_day(reader, day)
-    return replaced, replaced + filled
+    if not pending:
+        return 0, 0
+    # Collect while the current pending rows still exist.  This both excludes
+    # the old selections and lets us keep them if no replacements are found.
+    items = await builder.collect(reader, pending)
+    if not items:
+        return 0, 0
+    replaced = storage.replace_pending(day, items)
+    return replaced, replaced
 
 def register(bot, reader):
     def owner(event): return is_owner(event)
@@ -91,18 +90,12 @@ def register(bot, reader):
         removed, added = await refresh_queue(reader)
         await event.answer("Очередь обновлена", alert=False)
         await event.edit(f"Очередь обновлена: удалено {removed}, добавлено {added}", buttons=queue_controls())
-    @bot.on(events.NewMessage(pattern=r"^/set(?:\s+(\w+)(?:\s+(.+))?)?$"))
+    @bot.on(events.NewMessage(pattern=r"^/set\s+(\w+)\s+(.+)"))
     async def setting(event):
-        if not owner(event): return
-        key, value = event.pattern_match.group(1), event.pattern_match.group(2)
-        if not key or value is None:
-            await event.reply(SET_USAGE)
-        elif key in config.DEFAULTS:
-            value = value.strip()
-            storage.set_value(key, value)
-            await event.reply(f"{key} = {value}")
-        else:
-            await event.reply("Неизвестный параметр\n" + SET_USAGE)
+        if owner(event):
+            key,value=event.pattern_match.group(1),event.pattern_match.group(2).strip()
+            if key in config.DEFAULTS: storage.set_value(key,value); await event.reply(f"{key} = {value}")
+            else: await event.reply("Неизвестный параметр")
     @bot.on(events.NewMessage(pattern=r"^/config"))
     async def settings(event):
         if owner(event): await event.reply("\n".join(f"{k} = {storage.get(k)}" for k in config.DEFAULTS))
