@@ -1,0 +1,60 @@
+﻿TARGET: daily user-account reactions for @anime_edit_videoo
+BRANCH: main
+CHANGED_FIELDS: REACTION_AT=23:55 Europe/Moscow; REACTION_EMOJI=❤; due-day catch-up; Moscow day boundaries; already-reacted idempotence; scheduler integration
+
+ARTIFACTS:
+MODIFIED_FILE: C:\BOTS\аниме\artifacts\daily-reactions-20260810\MODIFIED_FILE.py
+DIFF_FILE: C:\BOTS\аниме\artifacts\daily-reactions-20260810\DIFF_FILE.patch
+VERIFICATION: C:\BOTS\аниме\artifacts\daily-reactions-20260810\VERIFICATION.txt
+ROLLBACK: C:\BOTS\аниме\artifacts\daily-reactions-20260810\ROLLBACK.sh
+
+ORIGINAL_HASHES:
+main.py SHA256 0B6A502900DE71034CE4661167AB804724293EDCDD4DC6CBC22CA0A4431BE877
+config.py SHA256 4C9DFB2BBF6549869414C6E015FAB3D7AE8DDBE5C342F29D3560D34D174BEF55
+tests/test_scheduler_helpers.py SHA256 699591962C17FDA1535EFEAC37D159BC6AFAA687A6630228EDE2328F45154F3E
+reactions.py ORIGINAL_STATUS ABSENT
+tests/test_daily_reactions.py ORIGINAL_STATUS ABSENT
+MODIFIED_FILE.py SHA256 4CC69D723FCFE8DA1A563D333A1680EE9F929F09C93A3EA5075B6DC5A725669F
+
+BASELINE:
+COMMAND: python -m pytest -q
+INPUT: original main@30c455f working files
+LITERAL_OUTPUT:
+..................................                                       [100%]
+34 passed in 15.07s
+EXIT_STATUS: 0
+RESULT: original suite passed without daily user-account reaction behavior.
+
+MODIFIED:
+COMMAND: python -m pytest -q
+INPUT: modified main.py, config.py, reactions.py, tests/test_daily_reactions.py, tests/test_scheduler_helpers.py on branch main
+LITERAL_OUTPUT:
+....................................                                     [100%]
+36 passed in 17.45s
+EXIT_STATUS: 0
+RESULT: daily cutoff, Moscow boundaries, Telegram reaction request, and idempotence tests passed.
+
+ROLLBACK:
+COMMAND: "C:\Program Files\Git\bin\bash.exe" "C:\BOTS\аниме\artifacts\daily-reactions-20260810\ROLLBACK.sh" "C:\Users\USER\AppData\Local\Temp\anime-reaction-rollback-ae1a29c6a5784904afae7e48c27416a2"
+INPUT: separate modified copy at C:\Users\USER\AppData\Local\Temp\anime-reaction-rollback-ae1a29c6a5784904afae7e48c27416a2
+LITERAL_OUTPUT:
+main.py RESTORED 0B6A502900DE71034CE4661167AB804724293EDCDD4DC6CBC22CA0A4431BE877
+config.py RESTORED 4C9DFB2BBF6549869414C6E015FAB3D7AE8DDBE5C342F29D3560D34D174BEF55
+tests\test_scheduler_helpers.py RESTORED 699591962C17FDA1535EFEAC37D159BC6AFAA687A6630228EDE2328F45154F3E
+reactions.py ABSENT_RESTORED
+tests\test_daily_reactions.py ABSENT_RESTORED
+EXIT_STATUS: 0
+RESTORED_BEHAVIOR_STATUS: the separate copy restored all original hashes and removed both newly added files; the workspace remains modified.
+
+LIVE_TELEGRAM_ACTION:
+COMMAND: reactions.react_to_day_posts(reader, date(2026, 8, 10), delay=0.5)
+INPUT: @anime_edit_videoo posts in the 2026-08-10 Europe/Moscow day
+LITERAL_OUTPUT: {'day': '2026-08-10', 'target': '@anime_edit_videoo', 'found': 2, 'reacted': 2, 'skipped': 0, 'failed': 0}
+EXIT_STATUS: 0
+RESULT: the user account placed ❤ on both posts from today.
+
+IDEMPOTENCE:
+COMMAND: reactions.react_to_day_posts(reader, date(2026, 8, 10), delay=0)
+LITERAL_OUTPUT: {'idempotence_check_day': '2026-08-10', 'found': 2, 'reacted': 0, 'skipped': 2, 'failed': 0}
+EXIT_STATUS: 0
+RESULT: the repeated run detected both existing reactions and made no duplicate changes.

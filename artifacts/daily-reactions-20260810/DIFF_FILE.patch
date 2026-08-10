@@ -1,0 +1,193 @@
+diff --git a/config.py b/config.py
+index da4d28f..bb18731 100644
+--- a/config.py
++++ b/config.py
+@@ -26,6 +26,8 @@ ROUTERAI_MODEL = os.getenv("ROUTERAI_MODEL", os.getenv("GEMINI_MODEL", "google/g
+ ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", os.getenv("GEMINI_BASE_URL", "https://routerai.ru/api/v1"))
+ TZ = ZoneInfo("Europe/Moscow")
+ BUILD_AT = "08:00"
++REACTION_AT = os.getenv("REACTION_AT", "23:55")
++REACTION_EMOJI = os.getenv("REACTION_EMOJI", "❤")
+ SIGNATURE = (
+     "#аниме #анимеэдит #anime #amv #animeedit\n"
+     '<a href="https://t.me/NosokVPNBot?start=partner_8235497168">Лучший VPN</a>'
+diff --git a/main.py b/main.py
+index 5a68c8e..72e05bb 100644
+--- a/main.py
++++ b/main.py
+@@ -2,7 +2,7 @@ import asyncio, logging
+ from datetime import datetime
+ from telethon import TelegramClient
+ from telethon.sessions import MemorySession, StringSession
+-import admin, builder, config, health, publisher, storage
++import admin, builder, config, health, publisher, reactions, storage
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+ _done: set[str] = set()
+ 
+@@ -31,6 +31,15 @@ async def scheduler(reader, bot):
+             now=datetime.now(config.TZ); day=now.strftime("%Y-%m-%d"); hhmm=now.strftime("%H:%M")
+             if hhmm==config.BUILD_AT and f"{day}:build" not in _done:
+                 _done.add(f"{day}:build"); await notify(bot, f"Очередь собрана: {await builder.build_day(reader)}")
++            reaction_day = reactions.due_reaction_day(now)
++            reaction_key = f"{reaction_day.isoformat()}:reactions"
++            if reaction_key not in _done:
++                stats = await reactions.react_to_day_posts(reader, reaction_day)
++                _done.add(reaction_key)
++                logging.getLogger("main").info(
++                    "Реакции за %s: найдено=%s поставлено=%s уже было=%s ошибок=%s",
++                    reaction_day, stats["found"], stats["reacted"], stats["skipped"], stats["failed"],
++                )
+             if storage.get("enabled")=="1" and hhmm in storage.get_list("slots") and f"{day}:{hhmm}" not in _done:
+                 _done.add(f"{day}:{hhmm}"); item=storage.take_slot(day,hhmm)
+                 if item is None: await builder.build_day(reader,day); item=storage.take_slot(day,hhmm)
+diff --git a/tests/test_scheduler_helpers.py b/tests/test_scheduler_helpers.py
+index 85e3278..4529b66 100644
+--- a/tests/test_scheduler_helpers.py
++++ b/tests/test_scheduler_helpers.py
+@@ -2,3 +2,5 @@ import config
+ def test_default_slots_are_moscow_schedule():
+     assert config.TZ.key == "Europe/Moscow"
+     assert config.DEFAULTS["slots"] == "10:00,13:00,18:00,21:00"
++    assert config.REACTION_AT == "23:55"
++    assert config.REACTION_EMOJI == "❤"
+diff --git a/reactions.py b/reactions.py
+new file mode 100644
+index 0000000..a65d3c6
+--- /dev/null
++++ b/reactions.py
+@@ -0,0 +1,67 @@
++import asyncio
++import logging
++from datetime import date, datetime, time, timedelta, timezone
++
++from telethon.tl.functions.messages import SendReactionRequest
++from telethon.tl.types import ReactionEmoji
++
++import config
++
++log = logging.getLogger("reactions")
++
++
++def _normalized_emoji(value: str) -> str:
++    return value.replace("\ufe0f", "")
++
++
++def has_own_reaction(message, emoji: str) -> bool:
++    reactions = getattr(message, "reactions", None)
++    for result in getattr(reactions, "results", None) or []:
++        reaction = getattr(result, "reaction", None)
++        if (
++            getattr(result, "chosen_order", None) is not None
++            and _normalized_emoji(getattr(reaction, "emoticon", "")) == _normalized_emoji(emoji)
++        ):
++            return True
++    return False
++
++
++def due_reaction_day(now: datetime) -> date:
++    reaction_time = datetime.strptime(config.REACTION_AT, "%H:%M").time()
++    return now.date() if now.time() >= reaction_time else now.date() - timedelta(days=1)
++
++
++async def react_to_day_posts(reader, day: date, delay: float = 0.4) -> dict[str, int]:
++    """Put the configured reaction on every ordinary target-channel post for a Moscow day."""
++    start = datetime.combine(day, time.min, tzinfo=config.TZ).astimezone(timezone.utc)
++    end = start + timedelta(days=1)
++    peer = await reader.get_input_entity(config.TARGET_CHANNEL)
++    stats = {"found": 0, "reacted": 0, "skipped": 0, "failed": 0}
++
++    async for message in reader.iter_messages(config.TARGET_CHANNEL, offset_date=end):
++        if not message.date or message.date >= end:
++            continue
++        if message.date < start:
++            break
++        if getattr(message, "action", None) is not None:
++            continue
++        stats["found"] += 1
++        if has_own_reaction(message, config.REACTION_EMOJI):
++            stats["skipped"] += 1
++            continue
++        try:
++            await reader(
++                SendReactionRequest(
++                    peer=peer,
++                    msg_id=message.id,
++                    reaction=[ReactionEmoji(emoticon=config.REACTION_EMOJI)],
++                )
++            )
++            stats["reacted"] += 1
++            if delay:
++                await asyncio.sleep(delay)
++        except Exception as exc:
++            stats["failed"] += 1
++            log.error("Не удалось поставить реакцию сообщению %s: %s", message.id, exc)
++
++    return stats
+diff --git a/tests/test_daily_reactions.py b/tests/test_daily_reactions.py
+new file mode 100644
+index 0000000..b34e325
+--- /dev/null
++++ b/tests/test_daily_reactions.py
+@@ -0,0 +1,62 @@
++import asyncio
++from datetime import date, datetime, timezone
++from types import SimpleNamespace
++
++from telethon.tl.types import ReactionCount, ReactionEmoji
++
++import config
++import reactions
++
++
++def message(message_id, timestamp, chosen=False, action=None):
++    results = []
++    if chosen:
++        results.append(ReactionCount(ReactionEmoji("❤"), 1, chosen_order=0))
++    return SimpleNamespace(
++        id=message_id,
++        date=timestamp,
++        action=action,
++        reactions=SimpleNamespace(results=results),
++    )
++
++
++def test_due_reaction_day_uses_today_after_cutoff_and_yesterday_before(monkeypatch):
++    monkeypatch.setattr(config, "REACTION_AT", "23:55")
++
++    assert reactions.due_reaction_day(datetime(2026, 8, 10, 23, 55)) == date(2026, 8, 10)
++    assert reactions.due_reaction_day(datetime(2026, 8, 10, 8, 0)) == date(2026, 8, 9)
++
++
++def test_react_to_day_posts_reacts_once_and_uses_moscow_boundaries(monkeypatch):
++    monkeypatch.setattr(config, "TARGET_CHANNEL", "@target")
++    monkeypatch.setattr(config, "REACTION_EMOJI", "❤")
++    messages = [
++        message(4, datetime(2026, 8, 9, 21, 1, tzinfo=timezone.utc)),  # 00:01 next day MSK
++        message(3, datetime(2026, 8, 9, 20, 30, tzinfo=timezone.utc), chosen=True),
++        message(2, datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)),
++        message(1, datetime(2026, 8, 8, 20, 59, tzinfo=timezone.utc)),
++    ]
++
++    class Reader:
++        def __init__(self):
++            self.requests = []
++
++        async def get_input_entity(self, target):
++            assert target == "@target"
++            return "peer"
++
++        async def __call__(self, request):
++            self.requests.append(request)
++
++        async def iter_messages(self, target, offset_date):
++            assert target == "@target"
++            for item in messages:
++                yield item
++
++    reader = Reader()
++    stats = asyncio.run(reactions.react_to_day_posts(reader, date(2026, 8, 9), delay=0))
++
++    assert stats == {"found": 2, "reacted": 1, "skipped": 1, "failed": 0}
++    assert len(reader.requests) == 1
++    assert reader.requests[0].msg_id == 2
++    assert reader.requests[0].reaction[0].emoticon == "❤"

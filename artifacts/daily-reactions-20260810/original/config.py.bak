@@ -26,8 +26,6 @@ ROUTERAI_MODEL = os.getenv("ROUTERAI_MODEL", os.getenv("GEMINI_MODEL", "google/g
 ROUTERAI_BASE_URL = os.getenv("ROUTERAI_BASE_URL", os.getenv("GEMINI_BASE_URL", "https://routerai.ru/api/v1"))
 TZ = ZoneInfo("Europe/Moscow")
 BUILD_AT = "08:00"
-REACTION_AT = os.getenv("REACTION_AT", "23:55")
-REACTION_EMOJI = os.getenv("REACTION_EMOJI", "❤")
 SIGNATURE = (
     "#аниме #анимеэдит #anime #amv #animeedit\n"
     '<a href="https://t.me/NosokVPNBot?start=partner_8235497168">Лучший VPN</a>'
