@@ -1,0 +1,65 @@
+Changed branch/field: main / Telegram admin control panel, Bot API 9.4 styled premium-emoji buttons, owner log delivery
+
+FOUR ARTIFACT PATHS
+MODIFIED_FILE: C:\BOTS\аниме\artifacts\telegram-control-panel-20260811\MODIFIED_FILE
+DIFF_FILE: C:\BOTS\аниме\artifacts\telegram-control-panel-20260811\DIFF_FILE
+VERIFICATION.txt: C:\BOTS\аниме\artifacts\telegram-control-panel-20260811\VERIFICATION.txt
+ROLLBACK.sh: C:\BOTS\аниме\artifacts\telegram-control-panel-20260811\ROLLBACK.sh
+
+ORIGINAL INPUT HASHES (SHA-256)
+admin.py: 922C55E87C6FB6B5CF2196A039D7E284D4B563AB6AC73A4E286293CEFDBD1FDF
+main.py: 6040AC2276162BCD0DC4990A6B6913F093C93095AC9DFE55A9C3345E2ACA16FC
+config.py: 49CA277946BA40F956A13B663D98A78C68994108538C05662BA7EF51DAD898F0
+requirements.txt: 2BDD034ABC2D8174C74397EC27D7D9BEF0E78B8F87A9D9E2BDBEB142163E7176
+tests/test_urgent_controls.py: 49391051967A790967CF7D7130E27C2A3FD80E509DEA5169C74B8B92C522A67C
+
+BASELINE
+Exact command: python -m pytest -q
+Input: preserved original source snapshot identified by the SHA-256 values above; documentation-only commits present; no Telegram control-panel production change.
+Literal output/result:
+..............................................                           [100%]
+46 passed in 5.15s
+Exit status: 0
+Behavior/status: original command-driven administrator interface; no styled control panel, in-bot log browser, or automatic owner error alerts.
+
+MODIFIED
+Exact command: python -m pytest -q
+Input: modified working tree with telegram_ui.py, botlogs.py, button-first admin.py, startup wiring, Telethon 1.44 pin, and all regression tests.
+Literal output/result:
+........................................................................ [ 98%]
+.                                                                        [100%]
+73 passed in 5.17s
+Exit status: 0
+Behavior/status: persistent quick keyboard and editable inline menus are active; semantic button colors and premium emoji use Unicode fallback; logs support filters/TXT download; ERROR/CRITICAL owner alerts are deduplicated for 300 seconds; legacy commands remain available.
+
+ROLLBACK
+Exact command: & 'C:\Program Files\Git\bin\bash.exe' 'C:/BOTS/аниме/artifacts/telegram-control-panel-20260811/ROLLBACK.sh' 'C:/Users/USER/AppData/Local/Temp/anime-ui-rollback-verify-d2e5a141304e4e4a8ca210afe41dada9' '--verify'
+Input: a separate git-cloned working copy overlaid with the modified files and the four transaction artifacts.
+Literal output/result:
+ROLLBACK_APPLIED=C:/Users/USER/AppData/Local/Temp/anime-ui-rollback-verify-d2e5a141304e4e4a8ca210afe41dada9
+RESTORED_HASH admin.py 922C55E87C6FB6B5CF2196A039D7E284D4B563AB6AC73A4E286293CEFDBD1FDF MATCH=True
+RESTORED_HASH config.py 49CA277946BA40F956A13B663D98A78C68994108538C05662BA7EF51DAD898F0 MATCH=True
+RESTORED_HASH main.py 6040AC2276162BCD0DC4990A6B6913F093C93095AC9DFE55A9C3345E2ACA16FC MATCH=True
+RESTORED_HASH requirements.txt 2BDD034ABC2D8174C74397EC27D7D9BEF0E78B8F87A9D9E2BDBEB142163E7176 MATCH=True
+RESTORED_HASH tests/test_urgent_controls.py 49391051967A790967CF7D7130E27C2A3FD80E509DEA5169C74B8B92C522A67C MATCH=True
+..............................................                           [100%]
+46 passed in 3.21s
+ROLLBACK_TESTS_EXIT=0
+RESTORED_BEHAVIOR=original command-only admin; telethon==1.36.0; baseline suite restored
+ROLLBACK_EXIT=0
+Exit status: 0
+Restored behavior/status: the separate copy exactly restored all five original hashes, removed the new UI/log modules and their tests, restored telethon==1.36.0, and passed the original 46-test suite. The primary workspace remains modified.
+
+ADDITIONAL VERIFICATION
+Exact command: python -m py_compile main.py admin.py telegram_ui.py botlogs.py publisher.py storage.py config.py
+Literal result: PY_COMPILE_EXIT=0
+Exact command: git diff --check
+Literal result: GIT_DIFF_CHECK_EXIT=0
+
+ARTIFACT INTEGRITY
+MODIFIED_FILE SHA-256: C4270FBEEC1C0BFF093DDDF385436C18805D5FBC935A209D9431FD727ED3E4FA
+DIFF_FILE SHA-256: 059B444140FA3089A93C8236CA3C0479ADA1F33377C95CB35A5436FBDA9896E0
+ROLLBACK.sh SHA-256: 6F020E308E3D9998B9D458DDC3696EBBB31BB759D48EF9908B32C97F48434FDA
+MODIFIED_FILE reopen result: ZIP entries=10; archive test=OK.
+DIFF_FILE reopen result: unified patch bytes=67386.
+ROLLBACK.sh reopen result: bash syntax exit=0; executable check exit=0.

@@ -2,9 +2,8 @@ import asyncio, logging
 from datetime import datetime
 from telethon import TelegramClient
 from telethon.sessions import MemorySession, StringSession
-import admin, botlogs, builder, config, health, publisher, reactions, storage, telegram_ui
+import admin, builder, config, health, publisher, reactions, storage
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
-botlogs.install_buffer()
 log = logging.getLogger("main")
 _done: set[str] = set()
 
@@ -27,24 +26,6 @@ async def add_reader_owner(reader):
     me = await reader.get_me()
     config.OWNER_IDS.add(me.id)
     log.info("Владельцев настроено: %s", len(config.OWNER_IDS))
-
-async def setup_admin_ui(reader, bot):
-    emoji_count = 0
-    try:
-        emoji_count = await asyncio.wait_for(
-            telegram_ui.load_emoji_set(reader), timeout=config.UI_EMOJI_TIMEOUT_SEC
-        )
-        log.info("Премиум-эмодзи панели загружены: %s", emoji_count)
-    except Exception:
-        # The entire panel remains usable with its Unicode fallbacks.
-        telegram_ui.set_emoji_icons({})
-        log.warning("Премиум-эмодзи недоступны; использую Unicode", exc_info=True)
-    try:
-        await admin.install_commands(bot)
-    except Exception:
-        log.warning("Не удалось обновить список команд Telegram", exc_info=True)
-    botlogs.install_owner_alerts(bot)
-    return emoji_count
 
 async def run_scheduler_tick(reader, bot, now=None):
     now = now or datetime.now(config.TZ)
@@ -117,9 +98,8 @@ async def main():
     storage.init(); await reader.start()
     await add_reader_owner(reader)
     await bot.start(bot_token=config.BOT_TOKEN)
-    await setup_admin_ui(reader, bot)
     admin.register(bot, reader)
-    await admin.send_ready(bot)
+    await notify(bot, "Бот запущен ✅")
     try:
         await asyncio.wait_for(builder.build_day(reader), timeout=config.BUILD_TIMEOUT_SEC)
     except asyncio.TimeoutError:

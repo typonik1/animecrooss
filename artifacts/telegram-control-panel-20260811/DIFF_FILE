@@ -1,0 +1,1752 @@
+diff --git a/admin.py b/admin.py
+index 1e02098..db5888e 100644
+--- a/admin.py
++++ b/admin.py
+@@ -1,19 +1,62 @@
++"""Owner-only Telegram commands and the button-first control panel."""
++
+ import asyncio
+ import logging
++import re
++import tempfile
++from collections import Counter
+ from html import escape
++from pathlib import Path
++
++from telethon import Button, events, functions, types
++
++import botlogs
++import builder
++import config
++import publisher
++import storage
++import telegram_ui
++
+
+-from telethon import Button, events
+-import builder, config, publisher, storage
+ log = logging.getLogger("admin")
+ _now_lock = asyncio.Lock()
+-HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
++_pending_input: dict[int, str] = {}
++
++HELP = (
++    "🎛 <b>Управление ботом</b>\n"
++    "Нажимай кнопки ниже — основные действия больше не требуют команд.\n\n"
++    "Команды остаются для быстрого доступа: /menu /now /queue /logs"
++)
+ SET_USAGE = "Использование: /set параметр значение\nПараметры: " + ", ".join(config.DEFAULTS)
+-def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
++
++
++def is_owner(event):
++    return event.is_private and event.sender_id in config.OWNER_IDS
++
++
++def normalize_source(value: str) -> str | None:
++    value = value.strip()
++    value = re.sub(r"^https?://t\.me/", "", value, flags=re.IGNORECASE).strip("/")
++    value = value.lstrip("@")
++    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", value):
++        return None
++    return "@" + value
++
++
++def normalize_slot(value: str) -> str | None:
++    value = value.strip()
++    if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", value):
++        return None
++    return value
++
+
+ def queue_controls():
++    """Compatibility control used by previously sent /queue messages."""
+     return Button.inline("🔄 Обновить очередь", b"refresh_queue")
+
++
+ def queue_line(slot, source, message_id, score, is_fallback, status):
++    """Compatibility formatter retained for command-level regression tests."""
+     label = f"{source}/{message_id}"
+     if source.startswith("@"):
+         username = source[1:]
+@@ -22,12 +65,90 @@ def queue_line(slot, source, message_id, score, is_fallback, status):
+         post = escape(label)
+     return f"{escape(slot)} {'🕓' if is_fallback else '🆕'} {post} · {escape(status)}"
+
++
++async def _call_view(method, text: str, buttons_factory, **kwargs):
++    common = {"parse_mode": "html", "link_preview": False, **kwargs}
++    try:
++        return await method(text, buttons=buttons_factory(True), **common)
++    except Exception:
++        log.warning("Premium-кнопки отклонены Telegram; использую Unicode", exc_info=True)
++        return await method(text, buttons=buttons_factory(False), **common)
++
++
++async def send_view(event, text: str, buttons_factory):
++    return await _call_view(event.reply, text, buttons_factory)
++
++
++async def edit_view(event, text: str, buttons_factory):
++    return await _call_view(event.edit, text, buttons_factory)
++
++
++def home_view(*, premium: bool = True):
++    rows = storage.list_queue(storage.today())
++    counts = Counter(row[5] for row in rows)
++    enabled = storage.get("enabled") == "1"
++    return (
++        telegram_ui.dashboard_text(
++            enabled=enabled,
++            counts=dict(counts),
++            slots=storage.get_list("slots"),
++        ),
++        telegram_ui.main_buttons(enabled=enabled, premium=premium),
++    )
++
++
++async def show_home(event, *, edit: bool = False):
++    method = event.edit if edit else event.reply
++
++    def buttons(premium):
++        return home_view(premium=premium)[1]
++
++    text = home_view(premium=False)[0]
++    return await _call_view(method, text, buttons)
++
++
++def sources_text() -> str:
++    sources = storage.get_list("sources")
++    lines = ["📡 <b>Источники роликов</b>", ""]
++    lines.extend(f"{index + 1}. <code>{escape(source)}</code>" for index, source in enumerate(sources))
++    if not sources:
++        lines.append("Источников пока нет")
++    return "\n".join(lines)
++
++
++def schedule_text() -> str:
++    slots = storage.get_list("slots")
++    return "🕒 <b>Расписание</b>\n\n" + (" · ".join(f"<b>{escape(slot)}</b>" for slot in slots) or "Слоты не заданы")
++
++
++def settings_text() -> str:
++    enabled = storage.get("enabled") == "1"
++    moderation = storage.get("moderation") == "1"
++    return "\n".join(
++        [
++            "⚙️ <b>Настройки</b>",
++            "",
++            f"Публикации: {'🟢 включены' if enabled else '🔴 приостановлены'}",
++            f"Модерация: {'🟢 включена' if moderation else '⚪ выключена'}",
++            f"Источников: <b>{len(storage.get_list('sources'))}</b>",
++            f"Слотов: <b>{len(storage.get_list('slots'))}</b>",
++        ]
++    )
++
++
++def config_text() -> str:
++    lines = ["ℹ️ <b>Текущая конфигурация</b>", ""]
++    lines.extend(f"<code>{escape(key)} = {escape(storage.get(key))}</code>" for key in config.DEFAULTS)
++    return "\n".join(lines)
++
++
+ async def publish_now(reader, bot):
+     items = await builder.collect(reader, 1)
+     if not items:
+         return None
+     return await publisher.publish(reader, bot, items[0])
+
++
+ async def handle_now(event, reader, bot):
+     if _now_lock.locked():
+         await event.reply("Команда /now уже выполняется")
+@@ -36,9 +157,7 @@ async def handle_now(event, reader, bot):
+     try:
+         await event.reply("Ищу свежий уникальный ролик…")
+         try:
+-            result = await asyncio.wait_for(
+-                publish_now(reader, bot), timeout=config.NOW_TIMEOUT_SEC
+-            )
++            result = await asyncio.wait_for(publish_now(reader, bot), timeout=config.NOW_TIMEOUT_SEC)
+         except asyncio.TimeoutError:
+             log.error("Команда /now превысила таймаут %.0f сек", config.NOW_TIMEOUT_SEC)
+             await event.reply("Время ожидания /now истекло. Попробуй ещё раз.")
+@@ -58,75 +177,412 @@ async def handle_now(event, reader, bot):
+     finally:
+         _now_lock.release()
+
++
+ async def refresh_queue(reader):
+     day = storage.today()
+     pending = storage.pending_count(day)
+     replaced = 0
+     if pending:
+-        # Collect while the current pending rows still exist.  This both
+-        # excludes old selections and preserves them if replacements run out.
+         items = await builder.collect(reader, pending)
+         if items:
+             replaced = storage.replace_pending(day, items)
+     filled = await builder.build_day(reader, day)
+     return replaced, replaced + filled
+
++
++async def _show_queue(event):
++    text = telegram_ui.queue_text(storage.list_queue(storage.today()))
++    return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
++
++
++async def _show_sources(event):
++    sources = storage.get_list("sources")
++    return await edit_view(
++        event,
++        sources_text(),
++        lambda premium: telegram_ui.source_buttons(sources, premium=premium),
++    )
++
++
++async def _show_schedule(event):
++    slots = storage.get_list("slots")
++    return await edit_view(
++        event,
++        schedule_text(),
++        lambda premium: telegram_ui.schedule_buttons(slots, premium=premium),
++    )
++
++
++async def _show_settings(event):
++    enabled = storage.get("enabled") == "1"
++    moderation = storage.get("moderation") == "1"
++    return await edit_view(
++        event,
++        settings_text(),
++        lambda premium: telegram_ui.settings_buttons(
++            enabled=enabled, moderation=moderation, premium=premium
++        ),
++    )
++
++
++async def _show_logs(event, category: str = "all"):
++    return await edit_view(
++        event,
++        botlogs.BUFFER.render_html(category),
++        lambda premium: telegram_ui.log_buttons(premium=premium),
++    )
++
++
++async def _download_logs(event, bot):
++    path: Path | None = None
++    try:
++        with tempfile.NamedTemporaryFile(
++            mode="w", encoding="utf-8", suffix=".txt", prefix="anime-bot-logs-", delete=False
++        ) as stream:
++            stream.write(botlogs.BUFFER.render_text("all"))
++            path = Path(stream.name)
++        await bot.send_file(
++            event.chat_id,
++            str(path),
++            caption="📥 Логи бота",
++            force_document=True,
++        )
++    finally:
++        if path is not None:
++            path.unlink(missing_ok=True)
++
++
++async def handle_ui_callback(event, reader, bot):
++    data = bytes(event.data).decode("utf-8")
++    if data == "ui:home":
++        return await show_home(event, edit=True)
++    if data == "ui:queue":
++        return await _show_queue(event)
++    if data == "ui:now":
++        await event.answer("Запускаю срочную публикацию…")
++        return await handle_now(event, reader, bot)
++    if data == "ui:refresh":
++        await event.answer("Обновляю очередь…")
++        removed, added = await asyncio.wait_for(
++            refresh_queue(reader), timeout=config.BUILD_TIMEOUT_SEC
++        )
++        text = (
++            f"🔄 <b>Очередь обновлена</b>\n"
++            f"Заменено: <b>{removed}</b> · добавлено: <b>{added}</b>\n\n"
++            + telegram_ui.queue_text(storage.list_queue(storage.today()))
++        )
++        return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
++    if data == "ui:build":
++        await event.answer("Собираю очередь…")
++        added = await asyncio.wait_for(builder.build_day(reader), timeout=config.BUILD_TIMEOUT_SEC)
++        text = f"🧩 <b>Сборка завершена</b> · добавлено: <b>{added}</b>\n\n" + telegram_ui.queue_text(storage.list_queue(storage.today()))
++        return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
++    if data == "ui:sources":
++        return await _show_sources(event)
++    if data == "ui:source:add":
++        _pending_input[event.sender_id] = "source_add"
++        return await edit_view(
++            event,
++            "➕ <b>Новый источник</b>\n\nОтправь следующим сообщением <code>@channel</code> или ссылку <code>https://t.me/channel</code>.",
++            lambda premium: [[telegram_ui.home_button(premium=premium)]],
++        )
++    if data.startswith("ui:source:del:"):
++        index = int(data.rsplit(":", 1)[1])
++        sources = storage.get_list("sources")
++        if 0 <= index < len(sources):
++            removed = sources.pop(index)
++            storage.set_value("sources", ",".join(sources))
++            await event.answer(f"Удалён {removed}")
++        return await _show_sources(event)
++    if data == "ui:times":
++        return await _show_schedule(event)
++    if data == "ui:time:add":
++        _pending_input[event.sender_id] = "time_add"
++        return await edit_view(
++            event,
++            "➕ <b>Новый слот</b>\n\nОтправь следующим сообщением время в формате <code>HH:MM</code>, например <code>18:00</code>.",
++            lambda premium: [[telegram_ui.home_button(premium=premium)]],
++        )
++    if data.startswith("ui:time:del:"):
++        raw = data.rsplit(":", 1)[1]
++        slot = f"{raw[:2]}:{raw[2:]}"
++        slots = [item for item in storage.get_list("slots") if item != slot]
++        storage.set_value("slots", ",".join(slots))
++        await event.answer(f"Удалён слот {slot}")
++        return await _show_schedule(event)
++    if data == "ui:time:default":
++        storage.set_value("slots", config.DEFAULTS["slots"])
++        await event.answer("Расписание восстановлено")
++        return await _show_schedule(event)
++    if data == "ui:settings":
++        return await _show_settings(event)
++    if data == "ui:toggle_enabled":
++        value = "0" if storage.get("enabled") == "1" else "1"
++        storage.set_value("enabled", value)
++        await event.answer("Публикации включены" if value == "1" else "Публикации приостановлены")
++        return await _show_settings(event)
++    if data == "ui:toggle_moderation":
++        value = "0" if storage.get("moderation") == "1" else "1"
++        storage.set_value("moderation", value)
++        await event.answer("Модерация включена" if value == "1" else "Модерация выключена")
++        return await _show_settings(event)
++    if data == "ui:config":
++        return await edit_view(
++            event,
++            config_text(),
++            lambda premium: [[telegram_ui.home_button(premium=premium)]],
++        )
++    if data in {"ui:logs", "ui:logs:all"}:
++        return await _show_logs(event, "all")
++    if data == "ui:logs:errors":
++        return await _show_logs(event, "errors")
++    if data == "ui:logs:publisher":
++        return await _show_logs(event, "publisher")
++    if data == "ui:logs:scheduler":
++        return await _show_logs(event, "scheduler")
++    if data == "ui:logs:download":
++        await event.answer("Готовлю TXT…")
++        return await _download_logs(event, bot)
++    await event.answer("Неизвестная кнопка", alert=False)
++    return None
++
++
++async def handle_pending_input(event, reader):
++    action = _pending_input.get(event.sender_id)
++    if not action:
++        return False
++    if event.raw_text.strip() in {
++        "Меню", "🏠 Меню", "Сейчас", "🚀 Сейчас",
++        "Очередь", "📋 Очередь", "Логи", "📜 Логи",
++    }:
++        _pending_input.pop(event.sender_id, None)
++        return False
++    if action == "source_add":
++        source = normalize_source(event.raw_text)
++        if source is None:
++            await event.reply("❌ Нужен username канала: <code>@channel</code>", parse_mode="html")
++            return True
++        try:
++            await reader.get_entity(source)
++        except Exception:
++            await event.reply("❌ Аккаунт-читатель не видит этот канал. Сначала подпиши его на канал.")
++            return True
++        sources = storage.get_list("sources")
++        if source not in sources:
++            sources.append(source)
++            storage.set_value("sources", ",".join(sources))
++        _pending_input.pop(event.sender_id, None)
++        await send_view(
++            event,
++            f"✅ Источник <code>{escape(source)}</code> добавлен",
++            lambda premium: telegram_ui.source_buttons(sources, premium=premium),
++        )
++        return True
++    if action == "time_add":
++        slot = normalize_slot(event.raw_text)
++        if slot is None:
++            await event.reply("❌ Время должно быть в формате <code>HH:MM</code>, например <code>18:00</code>.", parse_mode="html")
++            return True
++        slots = sorted(set(storage.get_list("slots") + [slot]))
++        storage.set_value("slots", ",".join(slots))
++        _pending_input.pop(event.sender_id, None)
++        await send_view(
++            event,
++            f"✅ Слот <b>{slot}</b> добавлен",
++            lambda premium: telegram_ui.schedule_buttons(slots, premium=premium),
++        )
++        return True
++    return False
++
++
++async def install_commands(bot):
++    commands = [
++        types.BotCommand("start", "Открыть панель управления"),
++        types.BotCommand("menu", "Главное меню"),
++        types.BotCommand("now", "Опубликовать ролик сейчас"),
++        types.BotCommand("queue", "Показать очередь"),
++        types.BotCommand("logs", "Показать логи"),
++    ]
++    return await bot(
++        functions.bots.SetBotCommandsRequest(
++            scope=types.BotCommandScopeDefault(), lang_code="ru", commands=commands
++        )
++    )
++
++
++async def send_ready(bot):
++    """Show every owner the persistent keyboard and fresh inline dashboard."""
++    for owner_id in sorted(config.OWNER_IDS):
++        views = (
++            (
++                "✅ <b>Бот запущен</b>\nПанель управления готова.",
++                lambda premium: telegram_ui.quick_keyboard(premium=premium),
++            ),
++            (
++                home_view(premium=False)[0],
++                lambda premium: home_view(premium=premium)[1],
++            ),
++        )
++        for text, buttons_factory in views:
++            try:
++                await bot.send_message(
++                    owner_id,
++                    text,
++                    buttons=buttons_factory(True),
++                    parse_mode="html",
++                    link_preview=False,
++                )
++            except Exception:
++                try:
++                    await bot.send_message(
++                        owner_id,
++                        text,
++                        buttons=buttons_factory(False),
++                        parse_mode="html",
++                        link_preview=False,
++                    )
++                except Exception:
++                    log.warning("Не удалось отправить стартовую панель владельцу %s", owner_id)
++
++
+ def register(bot, reader):
+-    def owner(event): return is_owner(event)
+-    @bot.on(events.NewMessage(pattern=r"^/(start|help)"))
+-    async def help_cmd(event):
+-        if is_owner(event): await event.reply(HELP, parse_mode="html")
+-        elif event.is_private: await event.reply(f"Ваш id: <code>{event.sender_id}</code>", parse_mode="html")
+-    @bot.on(events.NewMessage(pattern=r"^/id"))
+-    async def id_cmd(event): await event.reply(f"<code>{event.sender_id}</code>", parse_mode="html")
+-    @bot.on(events.NewMessage(pattern=r"^/sources"))
+-    async def sources(event):
+-        if owner(event): await event.reply("Источники:\n"+"\n".join(storage.get_list("sources")))
+-    @bot.on(events.NewMessage(pattern=r"^/add\s+(\S+)"))
+-    async def add(event):
+-        if not owner(event): return
+-        channel = event.pattern_match.group(1).replace("https://t.me/", "@"); channel = channel if channel.startswith("@") else "@"+channel
+-        if channel not in storage.get_list("sources"):
+-            try: await reader.get_entity(channel)
+-            except Exception: await event.reply("Не могу открыть канал: аккаунт-читатель должен быть на него подписан."); return
+-            storage.set_value("sources", ",".join(storage.get_list("sources")+[channel]))
+-        await event.reply(f"Добавлен {channel}")
+-    @bot.on(events.NewMessage(pattern=r"^/del\s+(\S+)"))
+-    async def delete(event):
+-        if owner(event): storage.set_value("sources", ",".join(x for x in storage.get_list("sources") if x.lower()!=event.pattern_match.group(1).lower())); await event.reply("Удалено")
+-    @bot.on(events.NewMessage(pattern=r"^/times(?:\s+(.+))?"))
+-    async def times(event):
+-        if not owner(event): return
+-        arg=event.pattern_match.group(1)
+-        if arg: storage.set_value("slots", ",".join(sorted({x.strip() for x in arg.split(",") if len(x.strip())==5 and x.strip()[2]==":"})))
+-        await event.reply("Слоты: "+storage.get("slots"))
+-    @bot.on(events.NewMessage(pattern=r"^/queue"))
+-    async def queue(event):
++    def owner(event):
++        return is_owner(event)
++
++    @bot.on(events.NewMessage(pattern=r"^/(start|help)$"))
++    async def start_cmd(event):
++        if is_owner(event):
++            await send_view(event, HELP, lambda premium: telegram_ui.quick_keyboard(premium=premium))
++            await show_home(event)
++        elif event.is_private:
++            await event.reply(f"Ваш id: <code>{event.sender_id}</code>", parse_mode="html")
++
++    @bot.on(events.NewMessage(pattern=r"^/menu$|^(?:🏠\s*)?Меню$"))
++    async def menu_cmd(event):
++        if owner(event):
++            await show_home(event)
++
++    @bot.on(events.NewMessage(pattern=r"^/id$"))
++    async def id_cmd(event):
++        await event.reply(f"<code>{event.sender_id}</code>", parse_mode="html")
++
++    @bot.on(events.NewMessage(pattern=r"^/sources$"))
++    async def sources_cmd(event):
++        if owner(event):
++            await send_view(
++                event,
++                sources_text(),
++                lambda premium: telegram_ui.source_buttons(storage.get_list("sources"), premium=premium),
++            )
++
++    @bot.on(events.NewMessage(pattern=r"^/add\s+(\S+)$"))
++    async def add_cmd(event):
++        if not owner(event):
++            return
++        source = normalize_source(event.pattern_match.group(1))
++        if source is None:
++            await event.reply("Неверный username канала")
++            return
++        try:
++            await reader.get_entity(source)
++        except Exception:
++            await event.reply("Не могу открыть канал: аккаунт-читатель должен быть на него подписан.")
++            return
++        sources = storage.get_list("sources")
++        if source not in sources:
++            storage.set_value("sources", ",".join(sources + [source]))
++        await event.reply(f"Добавлен {source}")
++
++    @bot.on(events.NewMessage(pattern=r"^/del\s+(\S+)$"))
++    async def delete_cmd(event):
++        if owner(event):
++            source = normalize_source(event.pattern_match.group(1))
++            storage.set_value(
++                "sources",
++                ",".join(item for item in storage.get_list("sources") if item.lower() != (source or "").lower()),
++            )
++            await event.reply("Удалено")
++
++    @bot.on(events.NewMessage(pattern=r"^/times(?:\s+(.+))?$"))
++    async def times_cmd(event):
++        if not owner(event):
++            return
++        arg = event.pattern_match.group(1)
++        if arg:
++            slots = [normalize_slot(item) for item in arg.split(",")]
++            if any(slot is None for slot in slots):
++                await event.reply("Неверное время. Формат: /times 10:00,13:00")
++                return
++            storage.set_value("slots", ",".join(sorted(set(slots))))
++        await event.reply("Слоты: " + storage.get("slots"))
++
++    @bot.on(events.NewMessage(pattern=r"^/queue$|^(?:📋\s*)?Очередь$"))
++    async def queue_cmd(event):
+         if owner(event):
+-            text = "\n".join(queue_line(*item) for item in storage.list_queue(storage.today())) or "Очередь пуста"
+-            await event.reply(text, buttons=queue_controls(), parse_mode="html", link_preview=False)
+-    @bot.on(events.NewMessage(pattern=r"^/build"))
+-    async def build(event):
+-        if owner(event): await event.reply(f"Добавлено: {await builder.build_day(reader)}")
+-    @bot.on(events.NewMessage(pattern=r"^/skip\s+(\S+)"))
+-    async def skip(event):
+-        if not owner(event): return
+-        item=storage.skip_slot(storage.today(), event.pattern_match.group(1))
+-        if item: storage.mark_posted(item["source"],item["message_id"],item["file_uid"],item["fingerprint"]); await builder.build_day(reader)
++            await send_view(
++                event,
++                telegram_ui.queue_text(storage.list_queue(storage.today())),
++                lambda premium: telegram_ui.queue_buttons(premium=premium),
++            )
++
++    @bot.on(events.NewMessage(pattern=r"^/build$"))
++    async def build_cmd(event):
++        if owner(event):
++            await event.reply(f"Добавлено: {await builder.build_day(reader)}")
++
++    @bot.on(events.NewMessage(pattern=r"^/skip\s+(\S+)$"))
++    async def skip_cmd(event):
++        if not owner(event):
++            return
++        item = storage.skip_slot(storage.today(), event.pattern_match.group(1))
++        if item:
++            storage.mark_posted(item["source"], item["message_id"], item["file_uid"], item["fingerprint"])
++            await builder.build_day(reader)
+         await event.reply("Готово")
+-    @bot.on(events.NewMessage(pattern=r"^/now"))
+-    async def now(event):
+-        if not owner(event): return
+-        await handle_now(event, reader, bot)
++
++    @bot.on(events.NewMessage(pattern=r"^/now$|^(?:🚀\s*)?Сейчас$"))
++    async def now_cmd(event):
++        if owner(event):
++            await handle_now(event, reader, bot)
++
++    @bot.on(events.NewMessage(pattern=r"^/logs$|^(?:📜\s*)?Логи$"))
++    async def logs_cmd(event):
++        if owner(event):
++            await send_view(
++                event,
++                botlogs.BUFFER.render_html("all"),
++                lambda premium: telegram_ui.log_buttons(premium=premium),
++            )
++
++    @bot.on(events.CallbackQuery(pattern=rb"^ui:"))
++    async def ui_callback(event):
++        if not is_owner(event):
++            await event.answer("Нет доступа", alert=True)
++            return
++        try:
++            await handle_ui_callback(event, reader, bot)
++        except asyncio.TimeoutError:
++            log.error("Таймаут действия панели: %r", event.data)
++            await event.answer("Операция превысила время ожидания", alert=True)
++        except Exception:
++            log.exception("Ошибка действия панели: %r", event.data)
++            await event.answer("Ошибка выполнения. Подробности в логах.", alert=True)
++
+     @bot.on(events.CallbackQuery(data=b"refresh_queue"))
+-    async def refresh(event):
+-        if not is_owner(event): return
++    async def legacy_refresh(event):
++        if not is_owner(event):
++            return
+         removed, added = await refresh_queue(reader)
+         await event.answer("Очередь обновлена", alert=False)
+-        await event.edit(f"Очередь обновлена: удалено {removed}, добавлено {added}", buttons=queue_controls())
++        await event.edit(
++            f"Очередь обновлена: удалено {removed}, добавлено {added}",
++            buttons=queue_controls(),
++        )
++
+     @bot.on(events.NewMessage(pattern=r"^/set(?:\s+(\w+)(?:\s+(.+))?)?$"))
+-    async def setting(event):
+-        if not owner(event): return
++    async def setting_cmd(event):
++        if not owner(event):
++            return
+         key, value = event.pattern_match.group(1), event.pattern_match.group(2)
+         if not key or value is None:
+             await event.reply(SET_USAGE)
+@@ -136,9 +592,19 @@ def register(bot, reader):
+             await event.reply(f"{key} = {value}")
+         else:
+             await event.reply("Неизвестный параметр\n" + SET_USAGE)
+-    @bot.on(events.NewMessage(pattern=r"^/config"))
+-    async def settings(event):
+-        if owner(event): await event.reply("\n".join(f"{k} = {storage.get(k)}" for k in config.DEFAULTS))
+-    @bot.on(events.NewMessage(pattern=r"^/(pause|resume)"))
+-    async def enabled(event):
+-        if owner(event): storage.set_value("enabled", "0" if event.pattern_match.group(1)=="pause" else "1"); await event.reply("Готово")
++
++    @bot.on(events.NewMessage(pattern=r"^/config$"))
++    async def config_cmd(event):
++        if owner(event):
++            await event.reply(config_text(), parse_mode="html")
++
++    @bot.on(events.NewMessage(pattern=r"^/(pause|resume)$"))
++    async def enabled_cmd(event):
++        if owner(event):
++            storage.set_value("enabled", "0" if event.pattern_match.group(1) == "pause" else "1")
++            await event.reply("Готово")
++
++    @bot.on(events.NewMessage())
++    async def pending_input(event):
++        if owner(event) and not event.raw_text.startswith("/"):
++            await handle_pending_input(event, reader)
+diff --git a/botlogs.py b/botlogs.py
+new file mode 100644
+index 0000000..9d5b120
+--- /dev/null
++++ b/botlogs.py
+@@ -0,0 +1,185 @@
++"""In-memory, owner-visible logging with bounded automatic error alerts."""
++
++import asyncio
++import logging
++import re
++import time
++from collections import deque
++from dataclasses import dataclass
++from datetime import datetime
++from html import escape
++from typing import Awaitable, Callable, Iterable
++
++import config
++
++
++_SECRET_PATTERNS = (
++    re.compile(r"(?i)\b(BOT_TOKEN|API_HASH|ROUTERAI_API_KEY|GEMINI_API_KEY|TELEGRAM_SESSION_STRING)\s*[=:]\s*\S+"),
++    re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{12,}\b"),
++)
++
++
++def redact(value: str) -> str:
++    result = str(value)
++    for pattern in _SECRET_PATTERNS:
++        result = pattern.sub("[скрыто]", result)
++    return result
++
++
++@dataclass(frozen=True)
++class LogEntry:
++    timestamp: datetime
++    levelno: int
++    levelname: str
++    logger: str
++    message: str
++
++
++class LogBuffer(logging.Handler):
++    """A logging handler that retains only a safe, finite recent history."""
++
++    def __init__(
++        self,
++        max_entries: int = 800,
++        now: Callable[[], datetime] | None = None,
++    ) -> None:
++        super().__init__(level=logging.INFO)
++        self._entries: deque[LogEntry] = deque(maxlen=max_entries)
++        self._now = now or (lambda: datetime.now(config.TZ))
++
++    def emit(self, record: logging.LogRecord) -> None:
++        try:
++            message = redact(record.getMessage())
++            if record.exc_info:
++                formatted = logging.Formatter().formatException(record.exc_info)
++                message = f"{message}\n{redact(formatted)}"
++            self._entries.append(
++                LogEntry(
++                    timestamp=self._now(),
++                    levelno=record.levelno,
++                    levelname=record.levelname,
++                    logger=record.name,
++                    message=message,
++                )
++            )
++        except Exception:
++            # Logging must never take the application down.
++            pass
++
++    def snapshot(self) -> list[LogEntry]:
++        return list(self._entries)
++
++    def filtered(self, category: str) -> list[LogEntry]:
++        entries = self.snapshot()
++        if category == "errors":
++            return [entry for entry in entries if entry.levelno >= logging.ERROR]
++        if category == "publisher":
++            return [entry for entry in entries if entry.logger.split(".", 1)[0] in {"publisher", "builder"}]
++        if category == "scheduler":
++            return [entry for entry in entries if entry.logger.split(".", 1)[0] in {"main", "reactions"}]
++        return entries
++
++    def _lines(self, category: str) -> list[str]:
++        return [
++            f"{entry.timestamp:%d.%m %H:%M:%S} | {entry.levelname} | {entry.logger} | {entry.message}"
++            for entry in self.filtered(category)
++        ]
++
++    def render_text(self, category: str = "all") -> str:
++        lines = self._lines(category)
++        return "\n".join(lines) if lines else "Записей пока нет"
++
++    def render_html(self, category: str = "all", limit: int = 3900) -> str:
++        lines = [escape(line) for line in self._lines(category)]
++        if not lines:
++            return "📭 <b>Записей пока нет</b>"
++        header = "📜 <b>Последние события</b>\n<pre>"
++        footer = "</pre>"
++        selected: deque[str] = deque()
++        size = len(header) + len(footer)
++        for line in reversed(lines):
++            extra = len(line) + (1 if selected else 0)
++            if size + extra > limit:
++                if not selected:
++                    available = max(0, limit - size)
++                    if available:
++                        selected.appendleft(
++                            line[: max(0, available - 1)] + ("…" if len(line) > available else "")
++                        )
++                break
++            selected.appendleft(line)
++            size += extra
++        return header + "\n".join(selected) + footer
++
++
++class OwnerAlertHandler(logging.Handler):
++    """Deliver ERROR/CRITICAL records once per dedupe window to every owner."""
++
++    def __init__(
++        self,
++        *,
++        send: Callable[[int, str], Awaitable[object]],
++        owner_ids: Callable[[], Iterable[int]],
++        dedupe_sec: float = 300,
++        monotonic: Callable[[], float] = time.monotonic,
++    ) -> None:
++        super().__init__(level=logging.ERROR)
++        self._send = send
++        self._owner_ids = owner_ids
++        self._dedupe_sec = dedupe_sec
++        self._monotonic = monotonic
++        self._last_sent: dict[tuple[str, int, str], float] = {}
++
++    async def _deliver(self, owner_ids: list[int], text: str) -> None:
++        for owner_id in owner_ids:
++            try:
++                await self._send(owner_id, text)
++            except Exception:
++                # Do not log this error: that would recursively create alerts.
++                pass
++
++    def emit(self, record: logging.LogRecord) -> None:
++        if record.levelno < logging.ERROR:
++            return
++        try:
++            message = redact(record.getMessage())
++            key = (record.name, record.levelno, message)
++            now = self._monotonic()
++            previous = self._last_sent.get(key)
++            if previous is not None and now - previous < self._dedupe_sec:
++                return
++            self._last_sent[key] = now
++            expired_before = now - self._dedupe_sec
++            self._last_sent = {item: sent for item, sent in self._last_sent.items() if sent >= expired_before}
++            owners = sorted(set(self._owner_ids()))
++            if not owners:
++                return
++            text = (
++                "🚨 <b>Ошибка бота</b>\n"
++                f"<b>{escape(record.name)}</b> · {escape(record.levelname)}\n"
++                f"<code>{escape(message[:3000])}</code>"
++            )
++            asyncio.get_running_loop().create_task(self._deliver(owners, text))
++        except Exception:
++            pass
++
++
++BUFFER = LogBuffer()
++
++
++def install_buffer(root: logging.Logger | None = None) -> LogBuffer:
++    root = root or logging.getLogger()
++    if BUFFER not in root.handlers:
++        root.addHandler(BUFFER)
++    return BUFFER
++
++
++def install_owner_alerts(bot, root: logging.Logger | None = None) -> OwnerAlertHandler:
++    root = root or logging.getLogger()
++
++    async def send(owner_id: int, text: str):
++        return await bot.send_message(owner_id, text, parse_mode="html", link_preview=False)
++
++    handler = OwnerAlertHandler(send=send, owner_ids=lambda: config.OWNER_IDS)
++    root.addHandler(handler)
++    return handler
+diff --git a/config.py b/config.py
+index 0689f55..c0ef818 100644
+--- a/config.py
++++ b/config.py
+@@ -45,3 +45,5 @@ DEFAULTS = {
+     "max_sec": "240", "max_mb": "48", "moderation": "0", "enabled": "1",
+ }
+ EMOJI_POOL = ["⚔️", "🔥", "🌸", "🩸", "🌙", "⚡", "🖤", "❄️", "🌊", "👺", "🎴", "💫"]
++UI_EMOJI_SET = os.getenv("UI_EMOJI_SET", "ReactionsEmojiVK")
++UI_EMOJI_TIMEOUT_SEC = float(os.getenv("UI_EMOJI_TIMEOUT_SEC", "20"))
+diff --git a/main.py b/main.py
+index d1f6229..0a5cb8e 100644
+--- a/main.py
++++ b/main.py
+@@ -2,8 +2,9 @@ import asyncio, logging
+ from datetime import datetime
+ from telethon import TelegramClient
+ from telethon.sessions import MemorySession, StringSession
+-import admin, builder, config, health, publisher, reactions, storage
++import admin, botlogs, builder, config, health, publisher, reactions, storage, telegram_ui
+ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
++botlogs.install_buffer()
+ log = logging.getLogger("main")
+ _done: set[str] = set()
+
+@@ -27,6 +28,24 @@ async def add_reader_owner(reader):
+     config.OWNER_IDS.add(me.id)
+     log.info("Владельцев настроено: %s", len(config.OWNER_IDS))
+
++async def setup_admin_ui(reader, bot):
++    emoji_count = 0
++    try:
++        emoji_count = await asyncio.wait_for(
++            telegram_ui.load_emoji_set(reader), timeout=config.UI_EMOJI_TIMEOUT_SEC
++        )
++        log.info("Премиум-эмодзи панели загружены: %s", emoji_count)
++    except Exception:
++        # The entire panel remains usable with its Unicode fallbacks.
++        telegram_ui.set_emoji_icons({})
++        log.warning("Премиум-эмодзи недоступны; использую Unicode", exc_info=True)
++    try:
++        await admin.install_commands(bot)
++    except Exception:
++        log.warning("Не удалось обновить список команд Telegram", exc_info=True)
++    botlogs.install_owner_alerts(bot)
++    return emoji_count
++
+ async def run_scheduler_tick(reader, bot, now=None):
+     now = now or datetime.now(config.TZ)
+     day = now.strftime("%Y-%m-%d")
+@@ -98,8 +117,9 @@ async def main():
+     storage.init(); await reader.start()
+     await add_reader_owner(reader)
+     await bot.start(bot_token=config.BOT_TOKEN)
++    await setup_admin_ui(reader, bot)
+     admin.register(bot, reader)
+-    await notify(bot, "Бот запущен ✅")
++    await admin.send_ready(bot)
+     try:
+         await asyncio.wait_for(builder.build_day(reader), timeout=config.BUILD_TIMEOUT_SEC)
+     except asyncio.TimeoutError:
+diff --git a/requirements.txt b/requirements.txt
+index 9186c06..096448a 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,4 +1,4 @@
+-telethon==1.36.0
++telethon==1.44.0
+ python-dotenv==1.0.1
+ openai==1.51.0
+ httpx==0.27.2
+diff --git a/telegram_ui.py b/telegram_ui.py
+new file mode 100644
+index 0000000..9332ccb
+--- /dev/null
++++ b/telegram_ui.py
+@@ -0,0 +1,217 @@
++"""Telegram control-panel presentation helpers.
++
++The module keeps button construction in one place so commands and callback
++menus have the same labels, colours and premium-emoji fallback behaviour.
++"""
++
++from html import escape
++
++from telethon import Button, functions, types
++
++import config
++
++
++_emoji_icons: dict[str, int] = {}
++
++
++def set_emoji_icons(mapping: dict[str, int]) -> None:
++    """Replace the runtime mapping of Unicode alternatives to custom emoji IDs."""
++    global _emoji_icons
++    _emoji_icons = dict(mapping)
++
++
++async def load_emoji_set(client) -> int:
++    """Load custom emoji IDs from the configured Telegram emoji set."""
++    result = await client(
++        functions.messages.GetStickerSetRequest(
++            stickerset=types.InputStickerSetShortName(config.UI_EMOJI_SET), hash=0
++        )
++    )
++    mapping: dict[str, int] = {}
++    for document in result.documents:
++        for attribute in document.attributes:
++            if isinstance(attribute, types.DocumentAttributeCustomEmoji):
++                mapping.setdefault(attribute.alt, document.id)
++    set_emoji_icons(mapping)
++    return len(mapping)
++
++
++def _caption(label: str, emoji: str, icon: int | None) -> str:
++    return label if icon else f"{emoji} {label}".strip()
++
++
++def inline_button(
++    label: str,
++    data: bytes,
++    *,
++    style: str | None = None,
++    emoji: str = "",
++    premium: bool = True,
++):
++    icon = _emoji_icons.get(emoji) if premium else None
++    return Button.inline(
++        _caption(label, emoji, icon), data, style=style, icon=icon
++    )
++
++
++def text_button(
++    label: str,
++    *,
++    style: str | None = None,
++    emoji: str = "",
++    premium: bool = True,
++):
++    icon = _emoji_icons.get(emoji) if premium else None
++    return Button.text(
++        _caption(label, emoji, icon), resize=True, style=style, icon=icon
++    )
++
++
++def quick_keyboard(*, premium: bool = True):
++    return [
++        [
++            text_button("Сейчас", style="success", emoji="🚀", premium=premium),
++            text_button("Очередь", style="primary", emoji="📋", premium=premium),
++        ],
++        [
++            text_button("Меню", style="primary", emoji="🏠", premium=premium),
++            text_button("Логи", style="primary", emoji="📜", premium=premium),
++        ],
++    ]
++
++
++def main_buttons(*, enabled: bool, premium: bool = True):
++    toggle_label = "Приостановить" if enabled else "Запустить"
++    toggle_style = "danger" if enabled else "success"
++    toggle_emoji = "⏸" if enabled else "▶️"
++    return [
++        [
++            inline_button("Сейчас", b"ui:now", style="success", emoji="🚀", premium=premium),
++            inline_button("Очередь", b"ui:queue", style="primary", emoji="📋", premium=premium),
++        ],
++        [
++            inline_button("Обновить", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
++            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
++        ],
++        [
++            inline_button("Источники", b"ui:sources", style="primary", emoji="📡", premium=premium),
++            inline_button("Расписание", b"ui:times", style="primary", emoji="🕒", premium=premium),
++        ],
++        [
++            inline_button("Настройки", b"ui:settings", style="primary", emoji="⚙️", premium=premium),
++            inline_button("Логи", b"ui:logs", style="primary", emoji="📜", premium=premium),
++        ],
++        [inline_button(toggle_label, b"ui:toggle_enabled", style=toggle_style, emoji=toggle_emoji, premium=premium)],
++    ]
++
++
++def home_button(*, premium: bool = True):
++    return inline_button("В меню", b"ui:home", style="primary", emoji="🏠", premium=premium)
++
++
++def queue_buttons(*, premium: bool = True):
++    return [
++        [
++            inline_button("Обновить очередь", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
++            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
++        ],
++        [home_button(premium=premium)],
++    ]
++
++
++def source_buttons(sources: list[str], *, premium: bool = True):
++    rows = [
++        [inline_button("Добавить источник", b"ui:source:add", style="success", emoji="➕", premium=premium)]
++    ]
++    rows.extend(
++        [inline_button(f"Удалить {source}", f"ui:source:del:{index}".encode(), style="danger", emoji="🗑", premium=premium)]
++        for index, source in enumerate(sources)
++    )
++    rows.append([home_button(premium=premium)])
++    return rows
++
++
++def schedule_buttons(slots: list[str], *, premium: bool = True):
++    rows = [
++        [inline_button("Добавить время", b"ui:time:add", style="success", emoji="➕", premium=premium)]
++    ]
++    rows.extend(
++        [inline_button(f"Удалить {slot}", f"ui:time:del:{slot.replace(':', '')}".encode(), style="danger", emoji="🗑", premium=premium)]
++        for slot in slots
++    )
++    rows.append(
++        [inline_button("По умолчанию", b"ui:time:default", style="primary", emoji="♻️", premium=premium)]
++    )
++    rows.append([home_button(premium=premium)])
++    return rows
++
++
++def settings_buttons(*, enabled: bool, moderation: bool, premium: bool = True):
++    enabled_label = "Остановить публикации" if enabled else "Запустить публикации"
++    enabled_style = "danger" if enabled else "success"
++    moderation_label = "Выключить модерацию" if moderation else "Включить модерацию"
++    moderation_style = "danger" if moderation else "success"
++    return [
++        [inline_button(enabled_label, b"ui:toggle_enabled", style=enabled_style, emoji="⏯", premium=premium)],
++        [inline_button(moderation_label, b"ui:toggle_moderation", style=moderation_style, emoji="🛡", premium=premium)],
++        [inline_button("Конфигурация", b"ui:config", style="primary", emoji="ℹ️", premium=premium)],
++        [home_button(premium=premium)],
++    ]
++
++
++def log_buttons(*, premium: bool = True):
++    return [
++        [
++            inline_button("Ошибки", b"ui:logs:errors", style="danger", emoji="🚨", premium=premium),
++            inline_button("Публикации", b"ui:logs:publisher", style="primary", emoji="📤", premium=premium),
++        ],
++        [
++            inline_button("Планировщик", b"ui:logs:scheduler", style="primary", emoji="🕒", premium=premium),
++            inline_button("Все", b"ui:logs:all", style="primary", emoji="📚", premium=premium),
++        ],
++        [inline_button("Скачать TXT", b"ui:logs:download", style="success", emoji="📥", premium=premium)],
++        [
++            inline_button("Обновить", b"ui:logs", style="primary", emoji="🔄", premium=premium),
++            home_button(premium=premium),
++        ],
++    ]
++
++
++_STATUS_LABELS = {
++    "pending": "⏳ ожидает",
++    "publishing": "📤 публикуется",
++    "posted": "✅ опубликован",
++    "failed": "❌ ошибка",
++    "skipped": "⏭ пропущен",
++}
++
++
++def queue_text(rows) -> str:
++    if not rows:
++        return "📭 <b>Очередь пуста</b>"
++    lines = ["📋 <b>Очередь публикаций</b>", ""]
++    for slot, source, message_id, _score, _is_fallback, status in rows:
++        safe_source = escape(str(source))
++        username = str(source).lstrip("@")
++        link = f"https://t.me/{escape(username, quote=True)}/{int(message_id)}"
++        state = _STATUS_LABELS.get(status, escape(str(status)))
++        lines.append(f"🕒 <b>{escape(slot)}</b> · <a href=\"{link}\">{safe_source}/{int(message_id)}</a> · {state}")
++    return "\n".join(lines)
++
++
++def dashboard_text(*, enabled: bool, counts: dict[str, int], slots: list[str]) -> str:
++    state = "🟢 <b>Бот работает</b>" if enabled else "🔴 <b>Бот приостановлен</b>"
++    schedule = " · ".join(escape(slot) for slot in slots) or "не задано"
++    return "\n".join(
++        [
++            "🎛 <b>Панель управления</b>",
++            state,
++            "",
++            f"✅ Опубликовано: <b>{counts.get('posted', 0)}</b>",
++            f"⏳ Ожидает: <b>{counts.get('pending', 0)}</b>",
++            f"📤 Публикуется: <b>{counts.get('publishing', 0)}</b>",
++            f"❌ Ошибки: <b>{counts.get('failed', 0)}</b>",
++            "",
++            f"🕒 Расписание: <b>{schedule}</b>",
++        ]
++    )
+diff --git a/tests/test_admin_panel.py b/tests/test_admin_panel.py
+new file mode 100644
+index 0000000..768640a
+--- /dev/null
++++ b/tests/test_admin_panel.py
+@@ -0,0 +1,212 @@
++﻿import asyncio
++from pathlib import Path
++from types import SimpleNamespace
++
++
++def _callbacks(rows):
++    return {button.data for row in rows for button in row if hasattr(button, "data")}
++
++
++def test_source_and_time_input_normalization_is_strict():
++    import admin
++
++    assert admin.normalize_source("https://t.me/AniZedEdits/") == "@AniZedEdits"
++    assert admin.normalize_source("AniZedEdits") == "@AniZedEdits"
++    assert admin.normalize_source("not valid!") is None
++    assert admin.normalize_slot("07:05") == "07:05"
++    assert admin.normalize_slot("23:59") == "23:59"
++    assert admin.normalize_slot("24:00") is None
++    assert admin.normalize_slot("7:05") is None
++
++
++def test_safe_view_retries_with_unicode_buttons_when_premium_icons_fail():
++    import admin
++
++    class Event:
++        def __init__(self):
++            self.calls = []
++
++        async def reply(self, text, **kwargs):
++            self.calls.append((text, kwargs))
++            if len(self.calls) == 1:
++                raise RuntimeError("CUSTOM_EMOJI_INVALID")
++            return "sent"
++
++    premiums = []
++
++    def buttons(premium):
++        premiums.append(premium)
++        return [[f"premium={premium}"]]
++
++    event = Event()
++    result = asyncio.run(admin.send_view(event, "hello", buttons))
++
++    assert result == "sent"
++    assert premiums == [True, False]
++    assert event.calls[1][1]["buttons"] == [["premium=False"]]
++
++
++def test_home_view_summarizes_storage_and_has_main_callbacks(monkeypatch):
++    import admin
++
++    monkeypatch.setattr(admin.storage, "get", lambda key: "1" if key == "enabled" else "")
++    monkeypatch.setattr(admin.storage, "get_list", lambda key: ["10:00", "13:00"])
++    monkeypatch.setattr(
++        admin.storage,
++        "list_queue",
++        lambda day: [
++            ("10:00", "@one", 1, 0, 0, "posted"),
++            ("13:00", "@two", 2, 0, 0, "pending"),
++            ("18:00", "@three", 3, 0, 0, "failed"),
++        ],
++    )
++    monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-11")
++
++    text, buttons = admin.home_view(premium=False)
++
++    assert "Бот работает" in text
++    assert "Опубликовано: <b>1</b>" in text
++    assert "Ожидает: <b>1</b>" in text
++    assert "Ошибки: <b>1</b>" in text
++    assert b"ui:now" in _callbacks(buttons)
++    assert b"ui:logs" in _callbacks(buttons)
++
++
++def test_queue_callback_edits_one_screen_with_links_and_buttons(monkeypatch):
++    import admin
++
++    monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-11")
++    monkeypatch.setattr(
++        admin.storage,
++        "list_queue",
++        lambda day: [("10:00", "@one", 7, 0, 0, "pending")],
++    )
++
++    class Event:
++        data = b"ui:queue"
++        sender_id = 1
++        is_private = True
++
++        def __init__(self):
++            self.edits = []
++            self.answers = []
++
++        async def edit(self, text, **kwargs):
++            self.edits.append((text, kwargs))
++
++        async def answer(self, text="", **kwargs):
++            self.answers.append((text, kwargs))
++
++    event = Event()
++    asyncio.run(admin.handle_ui_callback(event, "reader", "bot"))
++
++    assert 'href="https://t.me/one/7"' in event.edits[-1][0]
++    assert b"ui:refresh" in _callbacks(event.edits[-1][1]["buttons"])
++
++
++def test_settings_callbacks_toggle_enabled_and_moderation(monkeypatch):
++    import admin
++
++    values = {"enabled": "1", "moderation": "0", "slots": "10:00", "sources": "@one"}
++    monkeypatch.setattr(admin.storage, "get", lambda key: values[key])
++    monkeypatch.setattr(admin.storage, "set_value", lambda key, value: values.__setitem__(key, value))
++
++    class Event:
++        sender_id = 1
++        is_private = True
++
++        def __init__(self, data):
++            self.data = data
++            self.edits = []
++
++        async def edit(self, text, **kwargs):
++            self.edits.append((text, kwargs))
++
++        async def answer(self, *args, **kwargs):
++            pass
++
++    event = Event(b"ui:toggle_enabled")
++    asyncio.run(admin.handle_ui_callback(event, "reader", "bot"))
++    assert values["enabled"] == "0"
++    assert "приостановлен" in event.edits[-1][0]
++
++    event = Event(b"ui:toggle_moderation")
++    asyncio.run(admin.handle_ui_callback(event, "reader", "bot"))
++    assert values["moderation"] == "1"
++    assert "включена" in event.edits[-1][0]
++
++
++def test_log_download_is_sent_to_owner_and_temp_file_is_removed(monkeypatch):
++    import admin
++
++    monkeypatch.setattr(admin.botlogs.BUFFER, "render_text", lambda category: "line one\nline two")
++
++    class Event:
++        chat_id = 44
++        sender_id = 44
++        is_private = True
++        data = b"ui:logs:download"
++
++        async def answer(self, *args, **kwargs):
++            pass
++
++        async def edit(self, *args, **kwargs):
++            pass
++
++    class Bot:
++        def __init__(self):
++            self.path = None
++            self.contents = None
++
++        async def send_file(self, chat_id, path, **kwargs):
++            self.path = Path(path)
++            self.contents = self.path.read_text(encoding="utf-8")
++            assert chat_id == 44
++
++    bot = Bot()
++    asyncio.run(admin.handle_ui_callback(Event(), "reader", bot))
++
++    assert bot.contents == "line one\nline two"
++    assert bot.path is not None
++    assert not bot.path.exists()
++
++
++def test_next_message_adds_valid_schedule_time(monkeypatch):
++    import admin
++
++    values = {"slots": "10:00,13:00"}
++    monkeypatch.setattr(admin.storage, "get_list", lambda key: values[key].split(","))
++    monkeypatch.setattr(admin.storage, "set_value", lambda key, value: values.__setitem__(key, value))
++    admin._pending_input.clear()
++    admin._pending_input[7] = "time_add"
++
++    class Event:
++        sender_id = 7
++        is_private = True
++        raw_text = "18:00"
++
++        def __init__(self):
++            self.replies = []
++
++        async def reply(self, text, **kwargs):
++            self.replies.append((text, kwargs))
++
++    handled = asyncio.run(admin.handle_pending_input(Event(), "reader"))
++
++    assert handled is True
++    assert values["slots"] == "10:00,13:00,18:00"
++    assert 7 not in admin._pending_input
++
++def test_quick_navigation_cancels_pending_text_input():
++    import admin
++
++    admin._pending_input.clear()
++    admin._pending_input[9] = "source_add"
++
++    class Event:
++        sender_id = 9
++        raw_text = "🏠 Меню"
++
++    import asyncio
++    assert asyncio.run(admin.handle_pending_input(Event(), "reader")) is False
++    assert 9 not in admin._pending_input
+diff --git a/tests/test_admin_startup.py b/tests/test_admin_startup.py
+new file mode 100644
+index 0000000..08fe618
+--- /dev/null
++++ b/tests/test_admin_startup.py
+@@ -0,0 +1,143 @@
++﻿import asyncio
++import logging
++
++
++def test_setup_admin_ui_loads_emoji_commands_and_error_alerts(monkeypatch):
++    import main
++
++    calls = []
++
++    async def load(reader):
++        calls.append(("emoji", reader))
++        return 42
++
++    async def commands(bot):
++        calls.append(("commands", bot))
++
++    monkeypatch.setattr(main.telegram_ui, "load_emoji_set", load)
++    monkeypatch.setattr(main.admin, "install_commands", commands)
++    monkeypatch.setattr(main.botlogs, "install_owner_alerts", lambda bot: calls.append(("alerts", bot)))
++
++    assert asyncio.run(main.setup_admin_ui("reader", "bot")) == 42
++    assert calls == [("emoji", "reader"), ("commands", "bot"), ("alerts", "bot")]
++
++
++def test_setup_admin_ui_keeps_running_when_emoji_set_is_unavailable(monkeypatch):
++    import main
++
++    calls = []
++
++    async def broken(_reader):
++        raise RuntimeError("sticker set unavailable")
++
++    async def commands(bot):
++        calls.append(("commands", bot))
++
++    monkeypatch.setattr(main.telegram_ui, "load_emoji_set", broken)
++    monkeypatch.setattr(main.admin, "install_commands", commands)
++    monkeypatch.setattr(main.botlogs, "install_owner_alerts", lambda bot: calls.append(("alerts", bot)))
++
++    assert asyncio.run(main.setup_admin_ui("reader", "bot")) == 0
++    assert calls == [("commands", "bot"), ("alerts", "bot")]
++
++
++def test_log_buffer_is_installed_on_root_logger():
++    import botlogs
++    import main
++
++    assert botlogs.BUFFER in logging.getLogger().handlers
++
++
++def test_runtime_pins_telethon_with_styled_button_support():
++    from pathlib import Path
++
++    assert "telethon==1.44.0" in Path("requirements.txt").read_text(encoding="utf-8")
++import asyncio
++from types import SimpleNamespace
++
++
++def test_load_emoji_set_maps_custom_emoji_alt_to_document_id(monkeypatch):
++    import telegram_ui
++    from telethon import types
++
++    telegram_ui.set_emoji_icons({})
++    monkeypatch.setattr(telegram_ui.config, "UI_EMOJI_SET", "ReactionsEmojiVK")
++    seen = []
++
++    class Client:
++        async def __call__(self, request):
++            seen.append(request)
++            return SimpleNamespace(
++                documents=[
++                    SimpleNamespace(
++                        id=777,
++                        attributes=[
++                            types.DocumentAttributeCustomEmoji(
++                                alt="🚀", stickerset=types.InputStickerSetEmpty()
++                            )
++                        ],
++                    )
++                ]
++            )
++
++    assert asyncio.run(telegram_ui.load_emoji_set(Client())) == 1
++    button = telegram_ui.inline_button("Сейчас", b"ui:now", style="success", emoji="🚀")
++    assert button.style.icon == 777
++    assert seen[0].stickerset.short_name == "ReactionsEmojiVK"
++
++
++def test_install_commands_registers_compact_russian_menu():
++    import admin
++
++    class Bot:
++        def __init__(self):
++            self.requests = []
++
++        async def __call__(self, request):
++            self.requests.append(request)
++            return True
++
++    bot = Bot()
++    assert asyncio.run(admin.install_commands(bot)) is True
++    request = bot.requests[0]
++    assert request.lang_code == "ru"
++    assert [(item.command, item.description) for item in request.commands] == [
++        ("start", "Открыть панель управления"),
++        ("menu", "Главное меню"),
++        ("now", "Опубликовать ролик сейчас"),
++        ("queue", "Показать очередь"),
++        ("logs", "Показать логи"),
++    ]
++
++
++def test_send_ready_delivers_persistent_keyboard_and_dashboard(monkeypatch):
++    import admin
++
++    monkeypatch.setattr(admin.config, "OWNER_IDS", {22, 11})
++    monkeypatch.setattr(admin.storage, "today", lambda: "2026-08-11")
++    monkeypatch.setattr(admin.storage, "list_queue", lambda day: [])
++    monkeypatch.setattr(admin.storage, "get", lambda key: "1" if key == "enabled" else "")
++    monkeypatch.setattr(admin.storage, "get_list", lambda key: ["10:00"])
++
++    class Bot:
++        def __init__(self):
++            self.messages = []
++
++        async def send_message(self, owner_id, text, **kwargs):
++            self.messages.append((owner_id, text, kwargs))
++
++    bot = Bot()
++    asyncio.run(admin.send_ready(bot))
++
++    assert [owner for owner, _, _ in bot.messages] == [11, 11, 22, 22]
++    assert "Бот запущен" in bot.messages[0][1]
++    assert bot.messages[0][2]["buttons"]
++    assert "Панель управления" in bot.messages[1][1]
++    callbacks = {
++        button.data
++        for row in bot.messages[1][2]["buttons"]
++        for button in row
++        if hasattr(button, "data")
++    }
++    assert b"ui:now" in callbacks
++    assert b"ui:logs" in callbacks
+diff --git a/tests/test_botlogs.py b/tests/test_botlogs.py
+new file mode 100644
+index 0000000..0f2f472
+--- /dev/null
++++ b/tests/test_botlogs.py
+@@ -0,0 +1,111 @@
++﻿import asyncio
++import logging
++from datetime import datetime
++from zoneinfo import ZoneInfo
++
++
++def _record(name, level, message):
++    return logging.LogRecord(name, level, __file__, 1, message, (), None)
++
++
++def test_buffer_keeps_newest_entries_and_escapes_html():
++    import botlogs
++
++    buffer = botlogs.LogBuffer(max_entries=2, now=lambda: datetime(2026, 8, 11, 15, 30, tzinfo=ZoneInfo("Europe/Moscow")))
++    buffer.emit(_record("publisher", logging.INFO, "one"))
++    buffer.emit(_record("scheduler", logging.WARNING, "two <unsafe>"))
++    buffer.emit(_record("admin", logging.ERROR, "three & bad"))
++
++    assert [entry.message for entry in buffer.snapshot()] == ["two <unsafe>", "three & bad"]
++    html = buffer.render_html("all")
++    assert "15:30" in html
++    assert "two &lt;unsafe&gt;" in html
++    assert "three &amp; bad" in html
++    assert len(html) <= 3900
++
++
++def test_filters_select_errors_publications_and_scheduler():
++    import botlogs
++
++    buffer = botlogs.LogBuffer(max_entries=10)
++    buffer.emit(_record("publisher", logging.INFO, "posted"))
++    buffer.emit(_record("builder", logging.INFO, "built"))
++    buffer.emit(_record("main", logging.INFO, "scheduler tick"))
++    buffer.emit(_record("reactions", logging.INFO, "reacted"))
++    buffer.emit(_record("admin", logging.ERROR, "now failed"))
++
++    assert [e.message for e in buffer.filtered("errors")] == ["now failed"]
++    assert [e.message for e in buffer.filtered("publisher")] == ["posted", "built"]
++    assert [e.message for e in buffer.filtered("scheduler")] == ["scheduler tick", "reacted"]
++
++
++def test_sensitive_values_are_redacted_from_buffer():
++    import botlogs
++
++    buffer = botlogs.LogBuffer(max_entries=10)
++    buffer.emit(_record("admin", logging.ERROR, "BOT_TOKEN=12345:secret TELEGRAM_SESSION_STRING=abc"))
++
++    text = buffer.render_text("all")
++    assert "12345:secret" not in text
++    assert "TELEGRAM_SESSION_STRING=abc" not in text
++    assert "[скрыто]" in text
++
++
++def test_error_alerts_are_deduplicated_and_warnings_do_not_alert():
++    import botlogs
++
++    sent = []
++
++    async def scenario():
++        async def send(owner_id, text):
++            sent.append((owner_id, text))
++
++        now = [100.0]
++        handler = botlogs.OwnerAlertHandler(
++            send=send,
++            owner_ids=lambda: {22, 11},
++            dedupe_sec=300,
++            monotonic=lambda: now[0],
++        )
++        handler.emit(_record("telethon.network", logging.WARNING, "reconnected"))
++        handler.emit(_record("publisher", logging.ERROR, "upload failed"))
++        handler.emit(_record("publisher", logging.ERROR, "upload failed"))
++        await asyncio.sleep(0)
++        await asyncio.sleep(0)
++        assert [owner for owner, _ in sent] == [11, 22]
++        assert all("upload failed" in text for _, text in sent)
++
++        now[0] += 301
++        handler.emit(_record("publisher", logging.ERROR, "upload failed"))
++        await asyncio.sleep(0)
++        await asyncio.sleep(0)
++        assert [owner for owner, _ in sent] == [11, 22, 11, 22]
++
++    asyncio.run(scenario())
++
++
++def test_alert_send_failure_does_not_raise_or_log_recursively():
++    import botlogs
++
++    async def scenario():
++        async def send(_owner_id, _text):
++            raise RuntimeError("telegram down")
++
++        handler = botlogs.OwnerAlertHandler(send=send, owner_ids=lambda: {1})
++        handler.emit(_record("main", logging.CRITICAL, "fatal"))
++        await asyncio.sleep(0)
++        await asyncio.sleep(0)
++
++    asyncio.run(scenario())
++
++def test_single_oversized_log_entry_is_truncated_but_still_visible():
++    import logging
++    import botlogs
++
++    buffer = botlogs.LogBuffer(max_entries=2)
++    buffer.emit(_record("publisher", logging.ERROR, "BEGIN-" + "x" * 10000))
++
++    html = buffer.render_html("errors")
++    assert "BEGIN-" in html
++    assert "…" in html
++    assert len(html) <= 3900
+diff --git a/tests/test_telegram_ui.py b/tests/test_telegram_ui.py
+new file mode 100644
+index 0000000..9db4d70
+--- /dev/null
++++ b/tests/test_telegram_ui.py
+@@ -0,0 +1,114 @@
++from types import SimpleNamespace
++
++
++def _flat(rows):
++    return [button for row in rows for button in row]
++
++
++def _callbacks(rows):
++    return {button.data for button in _flat(rows) if hasattr(button, "data")}
++
++
++def test_inline_button_uses_style_and_loaded_premium_icon():
++    import telegram_ui
++
++    telegram_ui.set_emoji_icons({"🚀": 123456})
++    button = telegram_ui.inline_button(
++        "Сейчас", b"ui:now", style="success", emoji="🚀"
++    )
++
++    assert button.text == "Сейчас"
++    assert button.data == b"ui:now"
++    assert button.style.bg_success is True
++    assert button.style.icon == 123456
++
++
++def test_inline_button_uses_unicode_fallback_without_loaded_icon():
++    import telegram_ui
++
++    telegram_ui.set_emoji_icons({})
++    button = telegram_ui.inline_button(
++        "Сейчас", b"ui:now", style="success", emoji="🚀"
++    )
++
++    assert button.text == "🚀 Сейчас"
++    assert button.style.bg_success is True
++    assert button.style.icon is None
++
++
++def test_main_buttons_cover_common_actions_with_semantic_colors():
++    import telegram_ui
++
++    telegram_ui.set_emoji_icons({})
++    buttons = telegram_ui.main_buttons(enabled=True)
++    by_data = {button.data: button for button in _flat(buttons)}
++
++    assert set(by_data) == {
++        b"ui:now", b"ui:queue", b"ui:refresh", b"ui:build",
++        b"ui:sources", b"ui:times", b"ui:settings", b"ui:logs",
++        b"ui:toggle_enabled",
++    }
++    assert by_data[b"ui:now"].style.bg_success is True
++    assert by_data[b"ui:queue"].style.bg_primary is True
++    assert by_data[b"ui:toggle_enabled"].style.bg_danger is True
++
++    resumed = {button.data: button for button in _flat(telegram_ui.main_buttons(enabled=False))}
++    assert resumed[b"ui:toggle_enabled"].style.bg_success is True
++    assert "Запустить" in resumed[b"ui:toggle_enabled"].text
++
++
++def test_submenu_buttons_have_navigation_and_mutation_callbacks():
++    import telegram_ui
++
++    telegram_ui.set_emoji_icons({})
++
++    assert _callbacks(telegram_ui.queue_buttons()) == {
++        b"ui:refresh", b"ui:build", b"ui:home"
++    }
++    assert _callbacks(telegram_ui.source_buttons(["@one", "@two"])) == {
++        b"ui:source:add", b"ui:source:del:0", b"ui:source:del:1", b"ui:home"
++    }
++    assert _callbacks(telegram_ui.schedule_buttons(["10:00", "13:00"])) == {
++        b"ui:time:add", b"ui:time:del:1000", b"ui:time:del:1300",
++        b"ui:time:default", b"ui:home",
++    }
++    assert _callbacks(telegram_ui.settings_buttons(enabled=True, moderation=False)) == {
++        b"ui:toggle_enabled", b"ui:toggle_moderation", b"ui:config", b"ui:home"
++    }
++    assert _callbacks(telegram_ui.log_buttons()) == {
++        b"ui:logs:errors", b"ui:logs:publisher", b"ui:logs:scheduler",
++        b"ui:logs:all", b"ui:logs:download", b"ui:logs", b"ui:home",
++    }
++
++
++def test_queue_text_localizes_statuses_and_keeps_clickable_source_links():
++    import telegram_ui
++
++    rows = [
++        ("10:00", "@Anitik_edits", 22931, 10.0, 0, "pending"),
++        ("13:00", "@AnWordX", 7396, 9.0, 0, "publishing"),
++        ("18:00", "@AniZedEdits", 8932, 8.0, 0, "failed"),
++    ]
++
++    text = telegram_ui.queue_text(rows)
++
++    assert '<a href="https://t.me/Anitik_edits/22931">@Anitik_edits/22931</a>' in text
++    assert "⏳ ожидает" in text
++    assert "📤 публикуется" in text
++    assert "❌ ошибка" in text
++
++
++def test_dashboard_text_summarizes_state_counts_and_slots():
++    import telegram_ui
++
++    text = telegram_ui.dashboard_text(
++        enabled=True,
++        counts={"posted": 2, "pending": 1, "failed": 1, "publishing": 0},
++        slots=["10:00", "13:00", "18:00", "21:00"],
++    )
++
++    assert "🟢 <b>Бот работает</b>" in text
++    assert "Опубликовано: <b>2</b>" in text
++    assert "Ожидает: <b>1</b>" in text
++    assert "Ошибки: <b>1</b>" in text
++    assert "10:00 · 13:00 · 18:00 · 21:00" in text
