@@ -89,6 +89,90 @@ def test_now_returns_none_when_no_fresh_video_exists(monkeypatch):
     assert asyncio.run(admin.publish_now("reader", "bot")) is None
 
 
+def test_now_handler_acknowledges_then_reports_an_internal_error(monkeypatch):
+    import admin
+
+    class Event:
+        def __init__(self):
+            self.replies = []
+
+        async def reply(self, text):
+            self.replies.append(text)
+
+    async def broken_publish_now(reader, bot):
+        raise ConnectionError("reader disconnected")
+
+    event = Event()
+    monkeypatch.setattr(admin, "publish_now", broken_publish_now)
+    monkeypatch.setattr(admin, "_now_lock", asyncio.Lock(), raising=False)
+
+    assert asyncio.run(admin.handle_now(event, "reader", "bot")) is False
+    assert event.replies == [
+        "Ищу свежий уникальный ролик…",
+        "Ошибка /now: публикация не выполнена",
+    ]
+
+
+def test_now_handler_bounds_wait_and_reports_timeout(monkeypatch):
+    import admin
+
+    class Event:
+        def __init__(self):
+            self.replies = []
+
+        async def reply(self, text):
+            self.replies.append(text)
+
+    async def blocked_publish_now(reader, bot):
+        await asyncio.sleep(1)
+
+    event = Event()
+    monkeypatch.setattr(admin, "publish_now", blocked_publish_now)
+    monkeypatch.setattr(admin.config, "NOW_TIMEOUT_SEC", 0.01, raising=False)
+    monkeypatch.setattr(admin, "_now_lock", asyncio.Lock(), raising=False)
+
+    assert asyncio.run(admin.handle_now(event, "reader", "bot")) is False
+    assert event.replies == [
+        "Ищу свежий уникальный ролик…",
+        "Время ожидания /now истекло. Попробуй ещё раз.",
+    ]
+
+
+def test_now_handler_rejects_parallel_run(monkeypatch):
+    import admin
+
+    class Event:
+        def __init__(self):
+            self.replies = []
+
+        async def reply(self, text):
+            self.replies.append(text)
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def blocked_publish_now(reader, bot):
+            started.set()
+            await release.wait()
+            return True
+
+        monkeypatch.setattr(admin, "publish_now", blocked_publish_now)
+        monkeypatch.setattr(admin, "_now_lock", asyncio.Lock(), raising=False)
+        first = Event()
+        second = Event()
+        task = asyncio.create_task(admin.handle_now(first, "reader", "bot"))
+        await started.wait()
+        assert await admin.handle_now(second, "reader", "bot") is False
+        release.set()
+        assert await task is True
+        return first.replies, second.replies
+
+    first_replies, second_replies = asyncio.run(scenario())
+    assert first_replies == ["Ищу свежий уникальный ролик…", "Опубликовано"]
+    assert second_replies == ["Команда /now уже выполняется"]
+
+
 def test_refresh_replaces_pending_only_after_new_items_are_collected(monkeypatch):
     import admin
 

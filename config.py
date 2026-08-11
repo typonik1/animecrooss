@@ -28,6 +28,11 @@ TZ = ZoneInfo("Europe/Moscow")
 BUILD_AT = "08:00"
 REACTION_AT = os.getenv("REACTION_AT", "23:55")
 REACTION_EMOJI = os.getenv("REACTION_EMOJI", "❤")
+PUBLISH_TIMEOUT_SEC = float(os.getenv("PUBLISH_TIMEOUT_SEC", "600"))
+NOW_TIMEOUT_SEC = float(os.getenv("NOW_TIMEOUT_SEC", "660"))
+REACTION_TIMEOUT_SEC = float(os.getenv("REACTION_TIMEOUT_SEC", "300"))
+BUILD_TIMEOUT_SEC = float(os.getenv("BUILD_TIMEOUT_SEC", "300"))
+SCHEDULER_POLL_SEC = float(os.getenv("SCHEDULER_POLL_SEC", "20"))
 SIGNATURE = (
     "#аниме #анимеэдит #anime #amv #animeedit\n"
     '<a href="https://t.me/NosokVPNBot?start=partner_8235497168">Лучший VPN</a>'

@@ -25,6 +25,9 @@ def init() -> None:
         db.executescript(SCHEMA)
         db.executemany("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", config.DEFAULTS.items())
         _migrate_fingerprints(db)
+        # A process can stop after claiming a slot but before reporting the result.
+        # On startup those interrupted claims must become eligible again.
+        db.execute("UPDATE queue SET status='pending' WHERE status='publishing'")
         db.commit()
 
 def _migrate_fingerprints(db) -> None:
@@ -61,7 +64,7 @@ def is_used(source: str, message_id: int, file_uid: str = "", fingerprint: str =
         if row: return True
         row = db.execute(
             """SELECT 1 FROM queue
-               WHERE status IN ('pending','posted') AND (
+               WHERE status IN ('pending','publishing','posted') AND (
                    (source=? AND message_id=?)
                    OR (file_uid!='' AND file_uid=?)
                    OR (fingerprint!='' AND fingerprint=?)
@@ -91,8 +94,67 @@ def take_slot(day: str, slot: str) -> dict | None:
     if not row: return None
     return dict(zip(("id","source","message_id","file_uid","fingerprint","score","is_fallback"), row))
 
+def claim_next_due(day: str, hhmm: str) -> dict | None:
+    """Atomically claim the oldest pending slot whose scheduled time has passed."""
+    with _db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            """SELECT id,slot,source,message_id,file_uid,fingerprint,score,is_fallback
+               FROM queue
+               WHERE day=? AND slot<=? AND status='pending'
+               ORDER BY slot
+               LIMIT 1""",
+            (day, hhmm),
+        ).fetchone()
+        if row is None:
+            db.commit()
+            return None
+        updated = db.execute(
+            "UPDATE queue SET status='publishing' WHERE id=? AND status='pending'",
+            (row[0],),
+        )
+        if updated.rowcount != 1:
+            db.rollback()
+            return None
+        db.commit()
+    return dict(
+        zip(
+            ("id", "slot", "source", "message_id", "file_uid", "fingerprint", "score", "is_fallback"),
+            row,
+        )
+    )
+
 def set_status(queue_id: int, status: str) -> None:
     with _db() as db: db.execute("UPDATE queue SET status=? WHERE id=?", (status, queue_id)); db.commit()
+
+def get_status(queue_id: int) -> str | None:
+    with _db() as db:
+        row = db.execute("SELECT status FROM queue WHERE id=?", (queue_id,)).fetchone()
+    return row[0] if row else None
+
+def skip_slot(day: str, slot: str) -> dict | None:
+    """Cancel a pending slot, including one claimed for the moderation delay."""
+    with _db() as db:
+        db.execute("BEGIN IMMEDIATE")
+        row = db.execute(
+            """SELECT id,source,message_id,file_uid,fingerprint,score,is_fallback
+               FROM queue
+               WHERE day=? AND slot=? AND status IN ('pending','publishing')""",
+            (day, slot),
+        ).fetchone()
+        if row is None:
+            db.commit()
+            return None
+        updated = db.execute(
+            """UPDATE queue SET status='skipped'
+               WHERE id=? AND status IN ('pending','publishing')""",
+            (row[0],),
+        )
+        if updated.rowcount != 1:
+            db.rollback()
+            return None
+        db.commit()
+    return dict(zip(("id","source","message_id","file_uid","fingerprint","score","is_fallback"), row))
 
 def clear_pending(day: str) -> int:
     with _db() as db:

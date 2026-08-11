@@ -1,7 +1,11 @@
+import asyncio
+import logging
 from html import escape
 
 from telethon import Button, events
 import builder, config, publisher, storage
+log = logging.getLogger("admin")
+_now_lock = asyncio.Lock()
 HELP = "<b>Команды</b>\n/sources /add @channel /del @channel\n/times 10:00,13:00,18:00,21:00\n/queue /build /skip 13:00 /now\nПосле /queue доступна кнопка обновления очереди.\n/set key value /config /pause /resume /id"
 SET_USAGE = "Использование: /set параметр значение\nПараметры: " + ", ".join(config.DEFAULTS)
 def is_owner(event): return event.is_private and event.sender_id in config.OWNER_IDS
@@ -23,6 +27,36 @@ async def publish_now(reader, bot):
     if not items:
         return None
     return await publisher.publish(reader, bot, items[0])
+
+async def handle_now(event, reader, bot):
+    if _now_lock.locked():
+        await event.reply("Команда /now уже выполняется")
+        return False
+    await _now_lock.acquire()
+    try:
+        await event.reply("Ищу свежий уникальный ролик…")
+        try:
+            result = await asyncio.wait_for(
+                publish_now(reader, bot), timeout=config.NOW_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError:
+            log.error("Команда /now превысила таймаут %.0f сек", config.NOW_TIMEOUT_SEC)
+            await event.reply("Время ожидания /now истекло. Попробуй ещё раз.")
+            return False
+        except Exception:
+            log.exception("Ошибка команды /now")
+            await event.reply("Ошибка /now: публикация не выполнена")
+            return False
+        await event.reply(
+            "Опубликовано"
+            if result is True
+            else "Ошибка публикации"
+            if result is False
+            else "Свежих уникальных роликов не найдено"
+        )
+        return result
+    finally:
+        _now_lock.release()
 
 async def refresh_queue(reader):
     day = storage.today()
@@ -77,14 +111,13 @@ def register(bot, reader):
     @bot.on(events.NewMessage(pattern=r"^/skip\s+(\S+)"))
     async def skip(event):
         if not owner(event): return
-        item=storage.take_slot(storage.today(), event.pattern_match.group(1))
-        if item: storage.set_status(item["id"], "skipped"); storage.mark_posted(item["source"],item["message_id"],item["file_uid"],item["fingerprint"]); await builder.build_day(reader)
+        item=storage.skip_slot(storage.today(), event.pattern_match.group(1))
+        if item: storage.mark_posted(item["source"],item["message_id"],item["file_uid"],item["fingerprint"]); await builder.build_day(reader)
         await event.reply("Готово")
     @bot.on(events.NewMessage(pattern=r"^/now"))
     async def now(event):
         if not owner(event): return
-        result = await publish_now(reader, bot)
-        await event.reply("Опубликовано" if result is True else "Ошибка публикации" if result is False else "Свежих уникальных роликов не найдено")
+        await handle_now(event, reader, bot)
     @bot.on(events.CallbackQuery(data=b"refresh_queue"))
     async def refresh(event):
         if not is_owner(event): return
