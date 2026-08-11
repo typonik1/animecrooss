@@ -45,5 +45,5 @@ DEFAULTS = {
     "max_sec": "240", "max_mb": "48", "moderation": "0", "enabled": "1",
 }
 EMOJI_POOL = ["⚔️", "🔥", "🌸", "🩸", "🌙", "⚡", "🖤", "❄️", "🌊", "👺", "🎴", "💫"]
-UI_EMOJI_SET = os.getenv("UI_EMOJI_SET", "FinanceEmoji")
+UI_EMOJI_SET = os.getenv("UI_EMOJI_SET", "ReactionsEmojiVK")
 UI_EMOJI_TIMEOUT_SEC = float(os.getenv("UI_EMOJI_TIMEOUT_SEC", "20"))

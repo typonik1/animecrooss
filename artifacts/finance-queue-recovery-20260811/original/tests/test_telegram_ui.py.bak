@@ -112,35 +112,3 @@ def test_dashboard_text_summarizes_state_counts_and_slots():
     assert "Ожидает: <b>1</b>" in text
     assert "Ошибки: <b>1</b>" in text
     assert "10:00 · 13:00 · 18:00 · 21:00" in text
-
-
-def test_finance_emoji_ids_are_used_for_every_control_button():
-    import telegram_ui
-
-    assert telegram_ui.FINANCE_EMOJI_IDS["🚀"] == 5195033767969839232
-    assert telegram_ui.FINANCE_EMOJI_IDS["📥"] == 5443127283898405358
-    assert telegram_ui.FINANCE_EMOJI_IDS["📤"] == 5445355530111437729
-    assert telegram_ui.FINANCE_EMOJI_IDS["📈"] == 5197503331215361533
-    assert telegram_ui.FINANCE_EMOJI_IDS["🛡"] == 5197288647275071607
-
-    telegram_ui.use_finance_emoji_icons()
-    grids = [
-        telegram_ui.main_buttons(enabled=True),
-        telegram_ui.queue_buttons(),
-        telegram_ui.source_buttons(["@one"]),
-        telegram_ui.schedule_buttons(["10:00"]),
-        telegram_ui.settings_buttons(enabled=True, moderation=False),
-        telegram_ui.log_buttons(),
-    ]
-    buttons = [button for grid in grids for row in grid for button in row]
-
-    assert buttons
-    assert all(button.style.icon in telegram_ui.FINANCE_EMOJI_IDS.values() for button in buttons)
-
-
-def test_queue_text_displays_the_planning_date():
-    import telegram_ui
-
-    text = telegram_ui.queue_text([], day="2026-08-12")
-
-    assert "12.08.2026" in text

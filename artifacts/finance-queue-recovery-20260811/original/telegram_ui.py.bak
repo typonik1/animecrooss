@@ -11,68 +11,13 @@ from telethon import Button, functions, types
 import config
 
 
-FINANCE_EMOJI_IDS: dict[str, int] = {
-    "⭐": 5267500801240092311,
-    "💵": 5197434882321567830,
-    "💶": 5197369495739455200,
-    "🪙": 5377505475015235101,
-    "💷": 5377775044342599336,
-    "💴": 5197161121106123533,
-    "⛏": 5197371802136892976,
-    "💳": 5445353829304387411,
-    "📥": 5443127283898405358,
-    "📤": 5445355530111437729,
-    "✍️": 5197269100878907942,
-    "🗺": 5330320040883411678,
-    "🛫": 5201691993775818138,
-    "💬": 5303138782004924588,
-    "🎯": 5310278924616356636,
-    "🛍": 5294167145079395967,
-    "🧾": 5444856076954520455,
-    "🪣": 5399909394525737759,
-    "🌎": 5224450179368767019,
-    "🐻": 5411089297476441876,
-    "🐂": 5411233191765759009,
-    "📇": 5332724926216428039,
-    "🧮": 5303214794336125778,
-    "⏱": 5382194935057372936,
-    "📉": 5429518319243775957,
-    "↗️": 5429651785352501917,
-    "🛒": 5312361253610475399,
-    "⚖️": 5400250414929041085,
-    "🐳": 5400362079783770689,
-    "💻": 5193177581888755275,
-    "📊": 5190806721286657692,
-    "🍀": 5305699699204837855,
-    "🐷": 5312123810638483121,
-    "↔️": 5271837459783638319,
-    "🏦": 5332455502917949981,
-    "🔭": 5379999674193172777,
-    "🧲": 5377535110289576661,
-    "💱": 5312441427764989435,
-    "💼": 5445221832074483553,
-    "🗓": 5274055917766202507,
-    "🖼": 5262517101578443800,
-    "📈": 5197503331215361533,
-    "🚀": 5195033767969839232,
-    "🛡": 5197288647275071607,
-    "❤️": 5267102644886853973,
-    "🏷": 5240228673738527951,
-    "💰": 5287231198098117669,
-    "💡": 5262844652964303985,
-}
-
-_emoji_icons: dict[str, int] = dict(FINANCE_EMOJI_IDS)
+_emoji_icons: dict[str, int] = {}
 
 
 def set_emoji_icons(mapping: dict[str, int]) -> None:
     """Replace the runtime mapping of Unicode alternatives to custom emoji IDs."""
     global _emoji_icons
     _emoji_icons = dict(mapping)
-
-
-def use_finance_emoji_icons() -> None:
-    set_emoji_icons(FINANCE_EMOJI_IDS)
 
 
 async def load_emoji_set(client) -> int:
@@ -82,17 +27,13 @@ async def load_emoji_set(client) -> int:
             stickerset=types.InputStickerSetShortName(config.UI_EMOJI_SET), hash=0
         )
     )
-    discovered: dict[str, int] = {}
+    mapping: dict[str, int] = {}
     for document in result.documents:
         for attribute in document.attributes:
             if isinstance(attribute, types.DocumentAttributeCustomEmoji):
-                discovered.setdefault(attribute.alt, document.id)
-    mapping = dict(discovered)
-    # The user-supplied FinanceEmoji catalog is authoritative for control
-    # icons; discovery may add extra alternatives but cannot replace its IDs.
-    mapping.update(FINANCE_EMOJI_IDS)
+                mapping.setdefault(attribute.alt, document.id)
     set_emoji_icons(mapping)
-    return len(discovered)
+    return len(mapping)
 
 
 def _caption(label: str, emoji: str, icon: int | None) -> str:
@@ -130,11 +71,11 @@ def quick_keyboard(*, premium: bool = True):
     return [
         [
             text_button("Сейчас", style="success", emoji="🚀", premium=premium),
-            text_button("Очередь", style="primary", emoji="🗓", premium=premium),
+            text_button("Очередь", style="primary", emoji="📋", premium=premium),
         ],
         [
-            text_button("Меню", style="primary", emoji="⭐", premium=premium),
-            text_button("Логи", style="primary", emoji="🧾", premium=premium),
+            text_button("Меню", style="primary", emoji="🏠", premium=premium),
+            text_button("Логи", style="primary", emoji="📜", premium=premium),
         ],
     ]
 
@@ -142,37 +83,37 @@ def quick_keyboard(*, premium: bool = True):
 def main_buttons(*, enabled: bool, premium: bool = True):
     toggle_label = "Приостановить" if enabled else "Запустить"
     toggle_style = "danger" if enabled else "success"
-    toggle_emoji = "🛡" if enabled else "🚀"
+    toggle_emoji = "⏸" if enabled else "▶️"
     return [
         [
             inline_button("Сейчас", b"ui:now", style="success", emoji="🚀", premium=premium),
-            inline_button("Очередь", b"ui:queue", style="primary", emoji="🗓", premium=premium),
+            inline_button("Очередь", b"ui:queue", style="primary", emoji="📋", premium=premium),
         ],
         [
-            inline_button("Обновить", b"ui:refresh", style="primary", emoji="↔️", premium=premium),
-            inline_button("Собрать", b"ui:build", style="success", emoji="⛏", premium=premium),
+            inline_button("Обновить", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
+            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
         ],
         [
-            inline_button("Источники", b"ui:sources", style="primary", emoji="🗺", premium=premium),
-            inline_button("Расписание", b"ui:times", style="primary", emoji="⏱", premium=premium),
+            inline_button("Источники", b"ui:sources", style="primary", emoji="📡", premium=premium),
+            inline_button("Расписание", b"ui:times", style="primary", emoji="🕒", premium=premium),
         ],
         [
-            inline_button("Настройки", b"ui:settings", style="primary", emoji="💼", premium=premium),
-            inline_button("Логи", b"ui:logs", style="primary", emoji="🧾", premium=premium),
+            inline_button("Настройки", b"ui:settings", style="primary", emoji="⚙️", premium=premium),
+            inline_button("Логи", b"ui:logs", style="primary", emoji="📜", premium=premium),
         ],
         [inline_button(toggle_label, b"ui:toggle_enabled", style=toggle_style, emoji=toggle_emoji, premium=premium)],
     ]
 
 
 def home_button(*, premium: bool = True):
-    return inline_button("В меню", b"ui:home", style="primary", emoji="⭐", premium=premium)
+    return inline_button("В меню", b"ui:home", style="primary", emoji="🏠", premium=premium)
 
 
 def queue_buttons(*, premium: bool = True):
     return [
         [
-            inline_button("Обновить очередь", b"ui:refresh", style="primary", emoji="↔️", premium=premium),
-            inline_button("Собрать", b"ui:build", style="success", emoji="⛏", premium=premium),
+            inline_button("Обновить очередь", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
+            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
         ],
         [home_button(premium=premium)],
     ]
@@ -180,10 +121,10 @@ def queue_buttons(*, premium: bool = True):
 
 def source_buttons(sources: list[str], *, premium: bool = True):
     rows = [
-        [inline_button("Добавить источник", b"ui:source:add", style="success", emoji="📥", premium=premium)]
+        [inline_button("Добавить источник", b"ui:source:add", style="success", emoji="➕", premium=premium)]
     ]
     rows.extend(
-        [inline_button(f"Удалить {source}", f"ui:source:del:{index}".encode(), style="danger", emoji="📤", premium=premium)]
+        [inline_button(f"Удалить {source}", f"ui:source:del:{index}".encode(), style="danger", emoji="🗑", premium=premium)]
         for index, source in enumerate(sources)
     )
     rows.append([home_button(premium=premium)])
@@ -192,14 +133,14 @@ def source_buttons(sources: list[str], *, premium: bool = True):
 
 def schedule_buttons(slots: list[str], *, premium: bool = True):
     rows = [
-        [inline_button("Добавить время", b"ui:time:add", style="success", emoji="📥", premium=premium)]
+        [inline_button("Добавить время", b"ui:time:add", style="success", emoji="➕", premium=premium)]
     ]
     rows.extend(
-        [inline_button(f"Удалить {slot}", f"ui:time:del:{slot.replace(':', '')}".encode(), style="danger", emoji="📤", premium=premium)]
+        [inline_button(f"Удалить {slot}", f"ui:time:del:{slot.replace(':', '')}".encode(), style="danger", emoji="🗑", premium=premium)]
         for slot in slots
     )
     rows.append(
-        [inline_button("По умолчанию", b"ui:time:default", style="primary", emoji="↔️", premium=premium)]
+        [inline_button("По умолчанию", b"ui:time:default", style="primary", emoji="♻️", premium=premium)]
     )
     rows.append([home_button(premium=premium)])
     return rows
@@ -211,9 +152,9 @@ def settings_buttons(*, enabled: bool, moderation: bool, premium: bool = True):
     moderation_label = "Выключить модерацию" if moderation else "Включить модерацию"
     moderation_style = "danger" if moderation else "success"
     return [
-        [inline_button(enabled_label, b"ui:toggle_enabled", style=enabled_style, emoji="🚀" if not enabled else "🛡", premium=premium)],
+        [inline_button(enabled_label, b"ui:toggle_enabled", style=enabled_style, emoji="⏯", premium=premium)],
         [inline_button(moderation_label, b"ui:toggle_moderation", style=moderation_style, emoji="🛡", premium=premium)],
-        [inline_button("Конфигурация", b"ui:config", style="primary", emoji="💡", premium=premium)],
+        [inline_button("Конфигурация", b"ui:config", style="primary", emoji="ℹ️", premium=premium)],
         [home_button(premium=premium)],
     ]
 
@@ -221,16 +162,16 @@ def settings_buttons(*, enabled: bool, moderation: bool, premium: bool = True):
 def log_buttons(*, premium: bool = True):
     return [
         [
-            inline_button("Ошибки", b"ui:logs:errors", style="danger", emoji="📉", premium=premium),
-            inline_button("Публикации", b"ui:logs:publisher", style="primary", emoji="📈", premium=premium),
+            inline_button("Ошибки", b"ui:logs:errors", style="danger", emoji="🚨", premium=premium),
+            inline_button("Публикации", b"ui:logs:publisher", style="primary", emoji="📤", premium=premium),
         ],
         [
-            inline_button("Планировщик", b"ui:logs:scheduler", style="primary", emoji="🗓", premium=premium),
-            inline_button("Все", b"ui:logs:all", style="primary", emoji="🧾", premium=premium),
+            inline_button("Планировщик", b"ui:logs:scheduler", style="primary", emoji="🕒", premium=premium),
+            inline_button("Все", b"ui:logs:all", style="primary", emoji="📚", premium=premium),
         ],
         [inline_button("Скачать TXT", b"ui:logs:download", style="success", emoji="📥", premium=premium)],
         [
-            inline_button("Обновить", b"ui:logs", style="primary", emoji="↔️", premium=premium),
+            inline_button("Обновить", b"ui:logs", style="primary", emoji="🔄", premium=premium),
             home_button(premium=premium),
         ],
     ]
@@ -245,13 +186,10 @@ _STATUS_LABELS = {
 }
 
 
-def queue_text(rows, *, day: str | None = None) -> str:
-    date_line = ""
-    if day and len(day) == 10:
-        date_line = f"\n🗓 <b>{escape(day[8:10])}.{escape(day[5:7])}.{escape(day[:4])}</b>"
+def queue_text(rows) -> str:
     if not rows:
-        return "📭 <b>Очередь пуста</b>" + date_line
-    lines = ["🗓 <b>Очередь публикаций</b>" + date_line, ""]
+        return "📭 <b>Очередь пуста</b>"
+    lines = ["📋 <b>Очередь публикаций</b>", ""]
     for slot, source, message_id, _score, _is_fallback, status in rows:
         safe_source = escape(str(source))
         username = str(source).lstrip("@")

@@ -1,0 +1,93 @@
+Changed branch/field: main / FinanceEmoji button icons, next-day queue planning, idempotent panel refresh
+
+FOUR ARTIFACT PATHS
+MODIFIED_FILE: C:\BOTS\аниме\artifacts\finance-queue-recovery-20260811\MODIFIED_FILE
+DIFF_FILE: C:\BOTS\аниме\artifacts\finance-queue-recovery-20260811\DIFF_FILE
+VERIFICATION.txt: C:\BOTS\аниме\artifacts\finance-queue-recovery-20260811\VERIFICATION.txt
+ROLLBACK.sh: C:\BOTS\аниме\artifacts\finance-queue-recovery-20260811\ROLLBACK.sh
+
+USER INPUTS
+Finance emoji IDs: C:\Users\USER\Downloads\Telegram Desktop\MarkdownV2_FinanceEmoji.txt
+Production log: C:\Users\USER\.codex\attachments\36b0d6d7-bb23-44ba-a0b7-491e4855d033\pasted-text.txt
+Observed root cause 1: at 21:38 all configured slots 10:00,13:00,18:00,21:00 were earlier than the current time, so build_day reduced today's slots to an empty list and returned before collect() scanned any source.
+Observed root cause 2: MessageNotModifiedError from an unchanged queue screen was caught as a premium-button rejection, then the same edit was retried and raised again as an ERROR.
+Observed root cause 3: config.UI_EMOJI_SET defaulted to ReactionsEmojiVK instead of the supplied FinanceEmoji set and IDs.
+
+ORIGINAL INPUT HASHES (SHA-256)
+2282B9DF31BB0AD9B20AEAC9E02B6E55596FBF3CBBF70AF85F0FFA72FEFEC2B2  admin.py
+80D4471E27DCAE467C4F31DFE904D7063471A2253D3D307F3A8BD624E14E3BB3  builder.py
+829AEA4F14BF4CD11600DC67AA446519E39A8F26A22E5441CFDF1C843C087744  telegram_ui.py
+1F83E0C3729B30E4CB738F57A23AA6449911B03A214A10886CA0A97AD238921B  config.py
+262EB10C1956FFCDA56F40CFA5309DD43D70D6F166042A5847A7420022D5259C  main.py
+E12649355E8C46BF077F1567158033B820B82266841EAEE23E9062C51C78ECE3  tests/test_admin_panel.py
+AF23F600733406A5D7E7DE39996B0DEDC2B50C0EBAD9B34748CDD53A6B9C4BC1  tests/test_admin_startup.py
+A8503674572D9AADB972E901CA81192796729460AA674E2E110D7904D0A54845  tests/test_builder_selection.py
+1B7CF015083022E160D023A042E0D5B6333DD8D8FE69FF131A5739BB25B0AE4A  tests/test_telegram_ui.py
+
+BASELINE
+Exact command: python -m pytest -q
+Input: commit f86e573 production tree before FinanceEmoji/queue recovery changes, preserved by the hashes above.
+Literal output/result:
+........................................................................ [ 98%]
+.                                                                        [100%]
+73 passed in 10.92s
+Exit status: 0
+Behavior/status: default emoji set was ReactionsEmojiVK; a late manual build targeted today and had zero remaining slots; unchanged panel edits raised MessageNotModifiedError into the owner error alert path.
+
+MODIFIED
+Exact command: python -m pytest -q
+Input: working tree with exact FinanceEmoji IDs, Finance-only button icon choices, smart queue_day selection, next-day manual/startup builds, queue date display, build diagnostics, and MessageNotModified no-op handling.
+Literal output/result:
+........................................................................ [ 91%]
+.......                                                                  [100%]
+79 passed in 2.95s
+Exit status: 0
+Behavior/status: every control button resolves to an ID supplied in MarkdownV2_FinanceEmoji.txt; after the last daily slot an empty queue targets tomorrow; an overdue pending slot keeps today active; refresh/build display the selected planning date; unchanged edits finish without retry or ERROR; candidate counts and filter settings are logged.
+
+ROLLBACK
+Exact command: & 'C:\Program Files\Git\bin\bash.exe' 'C:/BOTS/аниме/artifacts/finance-queue-recovery-20260811/ROLLBACK.sh' 'C:/Users/USER/AppData/Local/Temp/anime-finance-queue-rollback-e0759dfc055e48b2a3d287f685e6a9da' '--verify'
+Input: a separate git clone overlaid with all nine modified code/test files plus the transaction artifacts.
+Literal output/result:
+ROLLBACK_APPLIED=C:/Users/USER/AppData/Local/Temp/anime-finance-queue-rollback-e0759dfc055e48b2a3d287f685e6a9da
+RESTORED_HASH admin.py 2282B9DF31BB0AD9B20AEAC9E02B6E55596FBF3CBBF70AF85F0FFA72FEFEC2B2 MATCH=True
+RESTORED_HASH builder.py 80D4471E27DCAE467C4F31DFE904D7063471A2253D3D307F3A8BD624E14E3BB3 MATCH=True
+RESTORED_HASH telegram_ui.py 829AEA4F14BF4CD11600DC67AA446519E39A8F26A22E5441CFDF1C843C087744 MATCH=True
+RESTORED_HASH config.py 1F83E0C3729B30E4CB738F57A23AA6449911B03A214A10886CA0A97AD238921B MATCH=True
+RESTORED_HASH main.py 262EB10C1956FFCDA56F40CFA5309DD43D70D6F166042A5847A7420022D5259C MATCH=True
+RESTORED_HASH tests/test_admin_panel.py E12649355E8C46BF077F1567158033B820B82266841EAEE23E9062C51C78ECE3 MATCH=True
+RESTORED_HASH tests/test_admin_startup.py AF23F600733406A5D7E7DE39996B0DEDC2B50C0EBAD9B34748CDD53A6B9C4BC1 MATCH=True
+RESTORED_HASH tests/test_builder_selection.py A8503674572D9AADB972E901CA81192796729460AA674E2E110D7904D0A54845 MATCH=True
+RESTORED_HASH tests/test_telegram_ui.py 1B7CF015083022E160D023A042E0D5B6333DD8D8FE69FF131A5739BB25B0AE4A MATCH=True
+........................................................................ [ 98%]
+.                                                                        [100%]
+73 passed in 3.10s
+ROLLBACK_TESTS_EXIT=0
+RESTORED_BEHAVIOR=ReactionsEmojiVK defaults; same-content edits raise; late manual build targets expired today only; 73-test baseline restored
+ROLLBACK_EXIT=0
+Exit status: 0
+Restored behavior/status: the separate copy restored all nine original hashes and the exact 73-test baseline behavior. The primary workspace remains modified.
+
+ADDITIONAL VERIFICATION
+Exact command: python -m py_compile admin.py builder.py telegram_ui.py config.py main.py
+Literal result: PY_COMPILE_EXIT=0
+Exact command: git diff --check
+Literal result: GIT_DIFF_CHECK_EXIT=0
+Direct planning probe literal result: PLANNING_DAY=2026-08-12
+Direct FinanceEmoji button probe literal results:
+ui:now ?????? 5195033767969839232
+ui:queue ??????? 5274055917766202507
+ui:refresh ???????? 5271837459783638319
+ui:build ??????? 5197371802136892976
+ui:sources ????????? 5330320040883411678
+ui:times ?????????? 5382194935057372936
+ui:settings ????????? 5445221832074483553
+ui:logs ???? 5444856076954520455
+ui:toggle_enabled ????????????? 5197288647275071607
+
+ARTIFACT INTEGRITY
+MODIFIED_FILE SHA-256: 521141BE4462DD0470FECF8318AB3A199482C883EDEC4BB9C755D8B0322D835D
+DIFF_FILE SHA-256: A27ECCAC3D119BE3C8A549BDDDF0EE62FBD1C7CC6C790EEBF98675DA0E7669D5
+ROLLBACK.sh SHA-256: CF3FF84F71CF5AA7F54B0956B23E0F5D8C592F2D0F0C5F8E7F1EA883B138D852
+MODIFIED_FILE reopen result: ZIP entries=9; archive test=OK.
+DIFF_FILE reopen result: unified patch bytes=28604.
+ROLLBACK.sh reopen result: bash syntax exit=0.

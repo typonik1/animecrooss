@@ -34,18 +34,11 @@ def test_setup_admin_ui_keeps_running_when_emoji_set_is_unavailable(monkeypatch)
         calls.append(("commands", bot))
 
     monkeypatch.setattr(main.telegram_ui, "load_emoji_set", broken)
-    fallback = []
-    monkeypatch.setattr(
-        main.telegram_ui,
-        "use_finance_emoji_icons",
-        lambda: fallback.append("finance"),
-    )
     monkeypatch.setattr(main.admin, "install_commands", commands)
     monkeypatch.setattr(main.botlogs, "install_owner_alerts", lambda bot: calls.append(("alerts", bot)))
 
     assert asyncio.run(main.setup_admin_ui("reader", "bot")) == 0
     assert calls == [("commands", "bot"), ("alerts", "bot")]
-    assert fallback == ["finance"]
 
 
 def test_log_buffer_is_installed_on_root_logger():
@@ -68,7 +61,7 @@ def test_load_emoji_set_maps_custom_emoji_alt_to_document_id(monkeypatch):
     from telethon import types
 
     telegram_ui.set_emoji_icons({})
-    monkeypatch.setattr(telegram_ui.config, "UI_EMOJI_SET", "FinanceEmoji")
+    monkeypatch.setattr(telegram_ui.config, "UI_EMOJI_SET", "ReactionsEmojiVK")
     seen = []
 
     class Client:
@@ -83,24 +76,14 @@ def test_load_emoji_set_maps_custom_emoji_alt_to_document_id(monkeypatch):
                                 alt="🚀", stickerset=types.InputStickerSetEmpty()
                             )
                         ],
-                    ),
-                    SimpleNamespace(
-                        id=888,
-                        attributes=[
-                            types.DocumentAttributeCustomEmoji(
-                                alt="🧪", stickerset=types.InputStickerSetEmpty()
-                            )
-                        ],
-                    ),
+                    )
                 ]
             )
 
-    assert asyncio.run(telegram_ui.load_emoji_set(Client())) == 2
+    assert asyncio.run(telegram_ui.load_emoji_set(Client())) == 1
     button = telegram_ui.inline_button("Сейчас", b"ui:now", style="success", emoji="🚀")
-    assert button.style.icon == telegram_ui.FINANCE_EMOJI_IDS["🚀"]
-    extra = telegram_ui.inline_button("Эксперимент", b"ui:test", emoji="🧪")
-    assert extra.style.icon == 888
-    assert seen[0].stickerset.short_name == "FinanceEmoji"
+    assert button.style.icon == 777
+    assert seen[0].stickerset.short_name == "ReactionsEmojiVK"
 
 
 def test_install_commands_registers_compact_russian_menu():

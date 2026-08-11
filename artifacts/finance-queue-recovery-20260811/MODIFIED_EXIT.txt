@@ -1,0 +1,2 @@
+﻿MODIFIED_COMMAND=python -m pytest -q
+MODIFIED_EXIT=0

@@ -121,46 +121,21 @@ async def collect(reader, need):
             )
         except Exception as exc:
             log.error("Ошибка чтения %s: %s", source, exc)
-    counts = ", ".join(f"{source}={len(items)}" for source, items in candidates.items())
-    selected = balanced_select(candidates, need)
-    log.info("Кандидаты очереди: нужно=%s выбрано=%s; %s", need, len(selected), counts or "источников нет")
-    if not selected:
-        log.warning(
-            "Подходящие ролики не найдены: scan_limit=%s fresh_days=%s min_age_min=%s длительность=%s..%s сек max_mb=%s",
-            storage.get("scan_limit"), storage.get("fresh_days"), storage.get("min_age_min"),
-            storage.get("min_sec"), storage.get("max_sec"), storage.get("max_mb"),
-        )
-    return selected
-
-
-def queue_day(now=None) -> str:
-    """Return the day whose upcoming/overdue slots the control panel manages."""
-    now = now or datetime.now(config.TZ)
-    today = storage.today()
-    if today != now.strftime("%Y-%m-%d"):
-        return today
-    rows = storage.list_queue(today)
-    if any(row[5] in {"pending", "publishing"} for row in rows):
-        return today
-    if any(slot >= now.strftime("%H:%M") for slot in storage.get_list("slots")):
-        return today
-    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    return balanced_select(candidates, need)
 
 
 async def build_day(reader, day=None):
     await ensure_target_history_synced(reader)
+    day = day or storage.today()
     now = datetime.now(config.TZ)
-    day = day or queue_day(now)
     slots = storage.get_list("slots")
     if day == now.strftime("%Y-%m-%d"):
         current_slot = now.strftime("%H:%M")
         slots = [slot for slot in slots if slot >= current_slot]
     empty = storage.free_slots(day, slots)
-    log.info("Сборка очереди: день=%s слоты=%s свободно=%s", day, slots, empty)
     if not empty:
         return 0
     items = await collect(reader, len(empty))
     for slot, item in zip(empty, items):
         storage.enqueue(day, slot, item)
-    log.info("Очередь собрана: день=%s добавлено=%s из %s", day, len(items), len(empty))
     return len(items)

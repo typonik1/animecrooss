@@ -1,0 +1,2 @@
+﻿BASELINE_COMMAND=python -m pytest -q
+BASELINE_EXIT=0

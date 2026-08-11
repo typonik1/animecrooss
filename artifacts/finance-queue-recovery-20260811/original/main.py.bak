@@ -37,8 +37,8 @@ async def setup_admin_ui(reader, bot):
         log.info("Премиум-эмодзи панели загружены: %s", emoji_count)
     except Exception:
         # The entire panel remains usable with its Unicode fallbacks.
-        telegram_ui.use_finance_emoji_icons()
-        log.warning("Набор FinanceEmoji недоступен по сети; использую сохранённые ID", exc_info=True)
+        telegram_ui.set_emoji_icons({})
+        log.warning("Премиум-эмодзи недоступны; использую Unicode", exc_info=True)
     try:
         await admin.install_commands(bot)
     except Exception:

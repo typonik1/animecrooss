@@ -1,0 +1,647 @@
+diff --git a/admin.py b/admin.py
+index db5888e..f003e76 100644
+--- a/admin.py
++++ b/admin.py
+@@ -9,6 +9,7 @@ from html import escape
+ from pathlib import Path
+
+ from telethon import Button, events, functions, types
++from telethon.errors import MessageNotModifiedError
+
+ import botlogs
+ import builder
+@@ -70,9 +71,17 @@ async def _call_view(method, text: str, buttons_factory, **kwargs):
+     common = {"parse_mode": "html", "link_preview": False, **kwargs}
+     try:
+         return await method(text, buttons=buttons_factory(True), **common)
+-    except Exception:
+-        log.warning("Premium-кнопки отклонены Telegram; использую Unicode", exc_info=True)
+-        return await method(text, buttons=buttons_factory(False), **common)
++    except MessageNotModifiedError:
++        return None
++    except Exception as exc:
++        error_text = f"{type(exc).__name__}: {exc}".upper()
++        if not any(token in error_text for token in ("CUSTOM_EMOJI", "BUTTON", "ICON")):
++            raise
++        log.warning("Premium-кнопки отклонены Telegram; использую Unicode: %s", exc)
++        try:
++            return await method(text, buttons=buttons_factory(False), **common)
++        except MessageNotModifiedError:
++            return None
+
+
+ async def send_view(event, text: str, buttons_factory):
+@@ -84,7 +93,7 @@ async def edit_view(event, text: str, buttons_factory):
+
+
+ def home_view(*, premium: bool = True):
+-    rows = storage.list_queue(storage.today())
++    rows = storage.list_queue(builder.queue_day())
+     counts = Counter(row[5] for row in rows)
+     enabled = storage.get("enabled") == "1"
+     return (
+@@ -179,7 +188,7 @@ async def handle_now(event, reader, bot):
+
+
+ async def refresh_queue(reader):
+-    day = storage.today()
++    day = builder.queue_day()
+     pending = storage.pending_count(day)
+     replaced = 0
+     if pending:
+@@ -191,7 +200,8 @@ async def refresh_queue(reader):
+
+
+ async def _show_queue(event):
+-    text = telegram_ui.queue_text(storage.list_queue(storage.today()))
++    day = builder.queue_day()
++    text = telegram_ui.queue_text(storage.list_queue(day), day=day)
+     return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
+
+
+@@ -269,13 +279,14 @@ async def handle_ui_callback(event, reader, bot):
+         text = (
+             f"🔄 <b>Очередь обновлена</b>\n"
+             f"Заменено: <b>{removed}</b> · добавлено: <b>{added}</b>\n\n"
+-            + telegram_ui.queue_text(storage.list_queue(storage.today()))
++            + telegram_ui.queue_text(storage.list_queue(builder.queue_day()), day=builder.queue_day())
+         )
+         return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
+     if data == "ui:build":
+         await event.answer("Собираю очередь…")
+-        added = await asyncio.wait_for(builder.build_day(reader), timeout=config.BUILD_TIMEOUT_SEC)
+-        text = f"🧩 <b>Сборка завершена</b> · добавлено: <b>{added}</b>\n\n" + telegram_ui.queue_text(storage.list_queue(storage.today()))
++        day = builder.queue_day()
++        added = await asyncio.wait_for(builder.build_day(reader, day), timeout=config.BUILD_TIMEOUT_SEC)
++        text = f"⛏ <b>Сборка завершена</b> · добавлено: <b>{added}</b>\n\n" + telegram_ui.queue_text(storage.list_queue(day), day=day)
+         return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
+     if data == "ui:sources":
+         return await _show_sources(event)
+@@ -521,7 +532,9 @@ def register(bot, reader):
+         if owner(event):
+             await send_view(
+                 event,
+-                telegram_ui.queue_text(storage.list_queue(storage.today())),
++                telegram_ui.queue_text(
++                    storage.list_queue(builder.queue_day()), day=builder.queue_day()
++                ),
+                 lambda premium: telegram_ui.queue_buttons(premium=premium),
+             )
+
+diff --git a/builder.py b/builder.py
+index 4c96eaa..1182277 100644
+--- a/builder.py
++++ b/builder.py
+@@ -121,21 +121,46 @@ async def collect(reader, need):
+             )
+         except Exception as exc:
+             log.error("Ошибка чтения %s: %s", source, exc)
+-    return balanced_select(candidates, need)
++    counts = ", ".join(f"{source}={len(items)}" for source, items in candidates.items())
++    selected = balanced_select(candidates, need)
++    log.info("Кандидаты очереди: нужно=%s выбрано=%s; %s", need, len(selected), counts or "источников нет")
++    if not selected:
++        log.warning(
++            "Подходящие ролики не найдены: scan_limit=%s fresh_days=%s min_age_min=%s длительность=%s..%s сек max_mb=%s",
++            storage.get("scan_limit"), storage.get("fresh_days"), storage.get("min_age_min"),
++            storage.get("min_sec"), storage.get("max_sec"), storage.get("max_mb"),
++        )
++    return selected
++
++
++def queue_day(now=None) -> str:
++    """Return the day whose upcoming/overdue slots the control panel manages."""
++    now = now or datetime.now(config.TZ)
++    today = storage.today()
++    if today != now.strftime("%Y-%m-%d"):
++        return today
++    rows = storage.list_queue(today)
++    if any(row[5] in {"pending", "publishing"} for row in rows):
++        return today
++    if any(slot >= now.strftime("%H:%M") for slot in storage.get_list("slots")):
++        return today
++    return (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+ async def build_day(reader, day=None):
+     await ensure_target_history_synced(reader)
+-    day = day or storage.today()
+     now = datetime.now(config.TZ)
++    day = day or queue_day(now)
+     slots = storage.get_list("slots")
+     if day == now.strftime("%Y-%m-%d"):
+         current_slot = now.strftime("%H:%M")
+         slots = [slot for slot in slots if slot >= current_slot]
+     empty = storage.free_slots(day, slots)
++    log.info("Сборка очереди: день=%s слоты=%s свободно=%s", day, slots, empty)
+     if not empty:
+         return 0
+     items = await collect(reader, len(empty))
+     for slot, item in zip(empty, items):
+         storage.enqueue(day, slot, item)
++    log.info("Очередь собрана: день=%s добавлено=%s из %s", day, len(items), len(empty))
+     return len(items)
+diff --git a/config.py b/config.py
+index c0ef818..bcd4c4c 100644
+--- a/config.py
++++ b/config.py
+@@ -45,5 +45,5 @@ DEFAULTS = {
+     "max_sec": "240", "max_mb": "48", "moderation": "0", "enabled": "1",
+ }
+ EMOJI_POOL = ["⚔️", "🔥", "🌸", "🩸", "🌙", "⚡", "🖤", "❄️", "🌊", "👺", "🎴", "💫"]
+-UI_EMOJI_SET = os.getenv("UI_EMOJI_SET", "ReactionsEmojiVK")
++UI_EMOJI_SET = os.getenv("UI_EMOJI_SET", "FinanceEmoji")
+ UI_EMOJI_TIMEOUT_SEC = float(os.getenv("UI_EMOJI_TIMEOUT_SEC", "20"))
+diff --git a/main.py b/main.py
+index 0a5cb8e..a6a96a8 100644
+--- a/main.py
++++ b/main.py
+@@ -37,8 +37,8 @@ async def setup_admin_ui(reader, bot):
+         log.info("Премиум-эмодзи панели загружены: %s", emoji_count)
+     except Exception:
+         # The entire panel remains usable with its Unicode fallbacks.
+-        telegram_ui.set_emoji_icons({})
+-        log.warning("Премиум-эмодзи недоступны; использую Unicode", exc_info=True)
++        telegram_ui.use_finance_emoji_icons()
++        log.warning("Набор FinanceEmoji недоступен по сети; использую сохранённые ID", exc_info=True)
+     try:
+         await admin.install_commands(bot)
+     except Exception:
+diff --git a/telegram_ui.py b/telegram_ui.py
+index 9332ccb..092c0cb 100644
+--- a/telegram_ui.py
++++ b/telegram_ui.py
+@@ -11,7 +11,58 @@ from telethon import Button, functions, types
+ import config
+
+
+-_emoji_icons: dict[str, int] = {}
++FINANCE_EMOJI_IDS: dict[str, int] = {
++    "⭐": 5267500801240092311,
++    "💵": 5197434882321567830,
++    "💶": 5197369495739455200,
++    "🪙": 5377505475015235101,
++    "💷": 5377775044342599336,
++    "💴": 5197161121106123533,
++    "⛏": 5197371802136892976,
++    "💳": 5445353829304387411,
++    "📥": 5443127283898405358,
++    "📤": 5445355530111437729,
++    "✍️": 5197269100878907942,
++    "🗺": 5330320040883411678,
++    "🛫": 5201691993775818138,
++    "💬": 5303138782004924588,
++    "🎯": 5310278924616356636,
++    "🛍": 5294167145079395967,
++    "🧾": 5444856076954520455,
++    "🪣": 5399909394525737759,
++    "🌎": 5224450179368767019,
++    "🐻": 5411089297476441876,
++    "🐂": 5411233191765759009,
++    "📇": 5332724926216428039,
++    "🧮": 5303214794336125778,
++    "⏱": 5382194935057372936,
++    "📉": 5429518319243775957,
++    "↗️": 5429651785352501917,
++    "🛒": 5312361253610475399,
++    "⚖️": 5400250414929041085,
++    "🐳": 5400362079783770689,
++    "💻": 5193177581888755275,
++    "📊": 5190806721286657692,
++    "🍀": 5305699699204837855,
++    "🐷": 5312123810638483121,
++    "↔️": 5271837459783638319,
++    "🏦": 5332455502917949981,
++    "🔭": 5379999674193172777,
++    "🧲": 5377535110289576661,
++    "💱": 5312441427764989435,
++    "💼": 5445221832074483553,
++    "🗓": 5274055917766202507,
++    "🖼": 5262517101578443800,
++    "📈": 5197503331215361533,
++    "🚀": 5195033767969839232,
++    "🛡": 5197288647275071607,
++    "❤️": 5267102644886853973,
++    "🏷": 5240228673738527951,
++    "💰": 5287231198098117669,
++    "💡": 5262844652964303985,
++}
++
++_emoji_icons: dict[str, int] = dict(FINANCE_EMOJI_IDS)
+
+
+ def set_emoji_icons(mapping: dict[str, int]) -> None:
+@@ -20,6 +71,10 @@ def set_emoji_icons(mapping: dict[str, int]) -> None:
+     _emoji_icons = dict(mapping)
+
+
++def use_finance_emoji_icons() -> None:
++    set_emoji_icons(FINANCE_EMOJI_IDS)
++
++
+ async def load_emoji_set(client) -> int:
+     """Load custom emoji IDs from the configured Telegram emoji set."""
+     result = await client(
+@@ -27,13 +82,17 @@ async def load_emoji_set(client) -> int:
+             stickerset=types.InputStickerSetShortName(config.UI_EMOJI_SET), hash=0
+         )
+     )
+-    mapping: dict[str, int] = {}
++    discovered: dict[str, int] = {}
+     for document in result.documents:
+         for attribute in document.attributes:
+             if isinstance(attribute, types.DocumentAttributeCustomEmoji):
+-                mapping.setdefault(attribute.alt, document.id)
++                discovered.setdefault(attribute.alt, document.id)
++    mapping = dict(discovered)
++    # The user-supplied FinanceEmoji catalog is authoritative for control
++    # icons; discovery may add extra alternatives but cannot replace its IDs.
++    mapping.update(FINANCE_EMOJI_IDS)
+     set_emoji_icons(mapping)
+-    return len(mapping)
++    return len(discovered)
+
+
+ def _caption(label: str, emoji: str, icon: int | None) -> str:
+@@ -71,11 +130,11 @@ def quick_keyboard(*, premium: bool = True):
+     return [
+         [
+             text_button("Сейчас", style="success", emoji="🚀", premium=premium),
+-            text_button("Очередь", style="primary", emoji="📋", premium=premium),
++            text_button("Очередь", style="primary", emoji="🗓", premium=premium),
+         ],
+         [
+-            text_button("Меню", style="primary", emoji="🏠", premium=premium),
+-            text_button("Логи", style="primary", emoji="📜", premium=premium),
++            text_button("Меню", style="primary", emoji="⭐", premium=premium),
++            text_button("Логи", style="primary", emoji="🧾", premium=premium),
+         ],
+     ]
+
+@@ -83,37 +142,37 @@ def quick_keyboard(*, premium: bool = True):
+ def main_buttons(*, enabled: bool, premium: bool = True):
+     toggle_label = "Приостановить" if enabled else "Запустить"
+     toggle_style = "danger" if enabled else "success"
+-    toggle_emoji = "⏸" if enabled else "▶️"
++    toggle_emoji = "🛡" if enabled else "🚀"
+     return [
+         [
+             inline_button("Сейчас", b"ui:now", style="success", emoji="🚀", premium=premium),
+-            inline_button("Очередь", b"ui:queue", style="primary", emoji="📋", premium=premium),
++            inline_button("Очередь", b"ui:queue", style="primary", emoji="🗓", premium=premium),
+         ],
+         [
+-            inline_button("Обновить", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
+-            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
++            inline_button("Обновить", b"ui:refresh", style="primary", emoji="↔️", premium=premium),
++            inline_button("Собрать", b"ui:build", style="success", emoji="⛏", premium=premium),
+         ],
+         [
+-            inline_button("Источники", b"ui:sources", style="primary", emoji="📡", premium=premium),
+-            inline_button("Расписание", b"ui:times", style="primary", emoji="🕒", premium=premium),
++            inline_button("Источники", b"ui:sources", style="primary", emoji="🗺", premium=premium),
++            inline_button("Расписание", b"ui:times", style="primary", emoji="⏱", premium=premium),
+         ],
+         [
+-            inline_button("Настройки", b"ui:settings", style="primary", emoji="⚙️", premium=premium),
+-            inline_button("Логи", b"ui:logs", style="primary", emoji="📜", premium=premium),
++            inline_button("Настройки", b"ui:settings", style="primary", emoji="💼", premium=premium),
++            inline_button("Логи", b"ui:logs", style="primary", emoji="🧾", premium=premium),
+         ],
+         [inline_button(toggle_label, b"ui:toggle_enabled", style=toggle_style, emoji=toggle_emoji, premium=premium)],
+     ]
+
+
+ def home_button(*, premium: bool = True):
+-    return inline_button("В меню", b"ui:home", style="primary", emoji="🏠", premium=premium)
++    return inline_button("В меню", b"ui:home", style="primary", emoji="⭐", premium=premium)
+
+
+ def queue_buttons(*, premium: bool = True):
+     return [
+         [
+-            inline_button("Обновить очередь", b"ui:refresh", style="primary", emoji="🔄", premium=premium),
+-            inline_button("Собрать", b"ui:build", style="success", emoji="🧩", premium=premium),
++            inline_button("Обновить очередь", b"ui:refresh", style="primary", emoji="↔️", premium=premium),
++            inline_button("Собрать", b"ui:build", style="success", emoji="⛏", premium=premium),
+         ],
+         [home_button(premium=premium)],
+     ]
+@@ -121,10 +180,10 @@ def queue_buttons(*, premium: bool = True):
+
+ def source_buttons(sources: list[str], *, premium: bool = True):
+     rows = [
+-        [inline_button("Добавить источник", b"ui:source:add", style="success", emoji="➕", premium=premium)]
++        [inline_button("Добавить источник", b"ui:source:add", style="success", emoji="📥", premium=premium)]
+     ]
+     rows.extend(
+-        [inline_button(f"Удалить {source}", f"ui:source:del:{index}".encode(), style="danger", emoji="🗑", premium=premium)]
++        [inline_button(f"Удалить {source}", f"ui:source:del:{index}".encode(), style="danger", emoji="📤", premium=premium)]
+         for index, source in enumerate(sources)
+     )
+     rows.append([home_button(premium=premium)])
+@@ -133,14 +192,14 @@ def source_buttons(sources: list[str], *, premium: bool = True):
+
+ def schedule_buttons(slots: list[str], *, premium: bool = True):
+     rows = [
+-        [inline_button("Добавить время", b"ui:time:add", style="success", emoji="➕", premium=premium)]
++        [inline_button("Добавить время", b"ui:time:add", style="success", emoji="📥", premium=premium)]
+     ]
+     rows.extend(
+-        [inline_button(f"Удалить {slot}", f"ui:time:del:{slot.replace(':', '')}".encode(), style="danger", emoji="🗑", premium=premium)]
++        [inline_button(f"Удалить {slot}", f"ui:time:del:{slot.replace(':', '')}".encode(), style="danger", emoji="📤", premium=premium)]
+         for slot in slots
+     )
+     rows.append(
+-        [inline_button("По умолчанию", b"ui:time:default", style="primary", emoji="♻️", premium=premium)]
++        [inline_button("По умолчанию", b"ui:time:default", style="primary", emoji="↔️", premium=premium)]
+     )
+     rows.append([home_button(premium=premium)])
+     return rows
+@@ -152,9 +211,9 @@ def settings_buttons(*, enabled: bool, moderation: bool, premium: bool = True):
+     moderation_label = "Выключить модерацию" if moderation else "Включить модерацию"
+     moderation_style = "danger" if moderation else "success"
+     return [
+-        [inline_button(enabled_label, b"ui:toggle_enabled", style=enabled_style, emoji="⏯", premium=premium)],
++        [inline_button(enabled_label, b"ui:toggle_enabled", style=enabled_style, emoji="🚀" if not enabled else "🛡", premium=premium)],
+         [inline_button(moderation_label, b"ui:toggle_moderation", style=moderation_style, emoji="🛡", premium=premium)],
+-        [inline_button("Конфигурация", b"ui:config", style="primary", emoji="ℹ️", premium=premium)],
++        [inline_button("Конфигурация", b"ui:config", style="primary", emoji="💡", premium=premium)],
+         [home_button(premium=premium)],
+     ]
+
+@@ -162,16 +221,16 @@ def settings_buttons(*, enabled: bool, moderation: bool, premium: bool = True):
+ def log_buttons(*, premium: bool = True):
+     return [
+         [
+-            inline_button("Ошибки", b"ui:logs:errors", style="danger", emoji="🚨", premium=premium),
+-            inline_button("Публикации", b"ui:logs:publisher", style="primary", emoji="📤", premium=premium),
++            inline_button("Ошибки", b"ui:logs:errors", style="danger", emoji="📉", premium=premium),
++            inline_button("Публикации", b"ui:logs:publisher", style="primary", emoji="📈", premium=premium),
+         ],
+         [
+-            inline_button("Планировщик", b"ui:logs:scheduler", style="primary", emoji="🕒", premium=premium),
+-            inline_button("Все", b"ui:logs:all", style="primary", emoji="📚", premium=premium),
++            inline_button("Планировщик", b"ui:logs:scheduler", style="primary", emoji="🗓", premium=premium),
++            inline_button("Все", b"ui:logs:all", style="primary", emoji="🧾", premium=premium),
+         ],
+         [inline_button("Скачать TXT", b"ui:logs:download", style="success", emoji="📥", premium=premium)],
+         [
+-            inline_button("Обновить", b"ui:logs", style="primary", emoji="🔄", premium=premium),
++            inline_button("Обновить", b"ui:logs", style="primary", emoji="↔️", premium=premium),
+             home_button(premium=premium),
+         ],
+     ]
+@@ -186,10 +245,13 @@ _STATUS_LABELS = {
+ }
+
+
+-def queue_text(rows) -> str:
++def queue_text(rows, *, day: str | None = None) -> str:
++    date_line = ""
++    if day and len(day) == 10:
++        date_line = f"\n🗓 <b>{escape(day[8:10])}.{escape(day[5:7])}.{escape(day[:4])}</b>"
+     if not rows:
+-        return "📭 <b>Очередь пуста</b>"
+-    lines = ["📋 <b>Очередь публикаций</b>", ""]
++        return "📭 <b>Очередь пуста</b>" + date_line
++    lines = ["🗓 <b>Очередь публикаций</b>" + date_line, ""]
+     for slot, source, message_id, _score, _is_fallback, status in rows:
+         safe_source = escape(str(source))
+         username = str(source).lstrip("@")
+diff --git a/tests/test_admin_panel.py b/tests/test_admin_panel.py
+index 768640a..0987c13 100644
+--- a/tests/test_admin_panel.py
++++ b/tests/test_admin_panel.py
+@@ -210,3 +210,51 @@ def test_quick_navigation_cancels_pending_text_input():
+     import asyncio
+     assert asyncio.run(admin.handle_pending_input(Event(), "reader")) is False
+     assert 9 not in admin._pending_input
++
++
++def test_message_not_modified_is_a_successful_noop_without_unicode_retry():
++    import admin
++    from telethon.errors import MessageNotModifiedError
++
++    class Event:
++        def __init__(self):
++            self.calls = 0
++
++        async def edit(self, text, **kwargs):
++            self.calls += 1
++            raise MessageNotModifiedError(request=None)
++
++    premiums = []
++
++    def buttons(premium):
++        premiums.append(premium)
++        return [[f"premium={premium}"]]
++
++    event = Event()
++    assert asyncio.run(admin.edit_view(event, "same", buttons)) is None
++    assert event.calls == 1
++    assert premiums == [True]
++
++
++def test_refresh_queue_uses_planning_day_selected_by_builder(monkeypatch):
++    import admin
++
++    calls = []
++    monkeypatch.setattr(admin.builder, "queue_day", lambda: "2026-08-12")
++    monkeypatch.setattr(
++        admin.storage,
++        "pending_count",
++        lambda day: calls.append(("pending", day)) or 0,
++    )
++
++    async def build_day(reader, day):
++        calls.append(("build", reader, day))
++        return 4
++
++    monkeypatch.setattr(admin.builder, "build_day", build_day)
++
++    assert asyncio.run(admin.refresh_queue("reader")) == (0, 4)
++    assert calls == [
++        ("pending", "2026-08-12"),
++        ("build", "reader", "2026-08-12"),
++    ]
+diff --git a/tests/test_admin_startup.py b/tests/test_admin_startup.py
+index 08fe618..6d3c5c8 100644
+--- a/tests/test_admin_startup.py
++++ b/tests/test_admin_startup.py
+@@ -34,11 +34,18 @@ def test_setup_admin_ui_keeps_running_when_emoji_set_is_unavailable(monkeypatch)
+         calls.append(("commands", bot))
+
+     monkeypatch.setattr(main.telegram_ui, "load_emoji_set", broken)
++    fallback = []
++    monkeypatch.setattr(
++        main.telegram_ui,
++        "use_finance_emoji_icons",
++        lambda: fallback.append("finance"),
++    )
+     monkeypatch.setattr(main.admin, "install_commands", commands)
+     monkeypatch.setattr(main.botlogs, "install_owner_alerts", lambda bot: calls.append(("alerts", bot)))
+
+     assert asyncio.run(main.setup_admin_ui("reader", "bot")) == 0
+     assert calls == [("commands", "bot"), ("alerts", "bot")]
++    assert fallback == ["finance"]
+
+
+ def test_log_buffer_is_installed_on_root_logger():
+@@ -61,7 +68,7 @@ def test_load_emoji_set_maps_custom_emoji_alt_to_document_id(monkeypatch):
+     from telethon import types
+
+     telegram_ui.set_emoji_icons({})
+-    monkeypatch.setattr(telegram_ui.config, "UI_EMOJI_SET", "ReactionsEmojiVK")
++    monkeypatch.setattr(telegram_ui.config, "UI_EMOJI_SET", "FinanceEmoji")
+     seen = []
+
+     class Client:
+@@ -76,14 +83,24 @@ def test_load_emoji_set_maps_custom_emoji_alt_to_document_id(monkeypatch):
+                                 alt="🚀", stickerset=types.InputStickerSetEmpty()
+                             )
+                         ],
+-                    )
++                    ),
++                    SimpleNamespace(
++                        id=888,
++                        attributes=[
++                            types.DocumentAttributeCustomEmoji(
++                                alt="🧪", stickerset=types.InputStickerSetEmpty()
++                            )
++                        ],
++                    ),
+                 ]
+             )
+
+-    assert asyncio.run(telegram_ui.load_emoji_set(Client())) == 1
++    assert asyncio.run(telegram_ui.load_emoji_set(Client())) == 2
+     button = telegram_ui.inline_button("Сейчас", b"ui:now", style="success", emoji="🚀")
+-    assert button.style.icon == 777
+-    assert seen[0].stickerset.short_name == "ReactionsEmojiVK"
++    assert button.style.icon == telegram_ui.FINANCE_EMOJI_IDS["🚀"]
++    extra = telegram_ui.inline_button("Эксперимент", b"ui:test", emoji="🧪")
++    assert extra.style.icon == 888
++    assert seen[0].stickerset.short_name == "FinanceEmoji"
+
+
+ def test_install_commands_registers_compact_russian_menu():
+diff --git a/tests/test_builder_selection.py b/tests/test_builder_selection.py
+index 1ea646a..16d3a74 100644
+--- a/tests/test_builder_selection.py
++++ b/tests/test_builder_selection.py
+@@ -120,3 +120,74 @@ def test_build_day_uses_only_remaining_today_slots(monkeypatch):
+     monkeypatch.setattr(builder, "collect", collect)
+
+     assert asyncio.run(builder.build_day(object(), "2026-08-10")) == 0
++
++
++def test_default_build_after_last_slot_targets_tomorrow(monkeypatch):
++    class FixedDateTime:
++        @classmethod
++        def now(cls, tz):
++            return datetime(2026, 8, 11, 21, 38, tzinfo=tz)
++
++    monkeypatch.setattr(builder, "datetime", FixedDateTime)
++    monkeypatch.setattr(builder.storage, "today", lambda: "2026-08-11")
++    monkeypatch.setattr(
++        builder.storage,
++        "get_list",
++        lambda key: ["10:00", "13:00", "18:00", "21:00"],
++    )
++    monkeypatch.setattr(builder.storage, "list_queue", lambda day: [])
++    free_calls = []
++    monkeypatch.setattr(
++        builder.storage,
++        "free_slots",
++        lambda day, slots: free_calls.append((day, slots)) or slots,
++    )
++    enqueued = []
++    monkeypatch.setattr(
++        builder.storage,
++        "enqueue",
++        lambda day, slot, selected: enqueued.append((day, slot, selected["message_id"])),
++    )
++
++    async def synced(reader):
++        return None
++
++    async def collect(reader, need):
++        return [item("@source", 100 - index, index + 1) for index in range(need)]
++
++    monkeypatch.setattr(builder, "ensure_target_history_synced", synced)
++    monkeypatch.setattr(builder, "collect", collect)
++
++    assert builder.queue_day() == "2026-08-12"
++    assert asyncio.run(builder.build_day(object())) == 4
++    assert free_calls == [
++        ("2026-08-12", ["10:00", "13:00", "18:00", "21:00"])
++    ]
++    assert enqueued == [
++        ("2026-08-12", "10:00", 1),
++        ("2026-08-12", "13:00", 2),
++        ("2026-08-12", "18:00", 3),
++        ("2026-08-12", "21:00", 4),
++    ]
++
++
++def test_queue_day_keeps_today_when_an_overdue_item_is_still_pending(monkeypatch):
++    class FixedDateTime:
++        @classmethod
++        def now(cls, tz):
++            return datetime(2026, 8, 11, 21, 38, tzinfo=tz)
++
++    monkeypatch.setattr(builder, "datetime", FixedDateTime)
++    monkeypatch.setattr(builder.storage, "today", lambda: "2026-08-11")
++    monkeypatch.setattr(
++        builder.storage,
++        "get_list",
++        lambda key: ["10:00", "13:00", "18:00", "21:00"],
++    )
++    monkeypatch.setattr(
++        builder.storage,
++        "list_queue",
++        lambda day: [("21:00", "@source", 7, 0, 0, "pending")],
++    )
++
++    assert builder.queue_day() == "2026-08-11"
+diff --git a/tests/test_telegram_ui.py b/tests/test_telegram_ui.py
+index 9db4d70..5f0d357 100644
+--- a/tests/test_telegram_ui.py
++++ b/tests/test_telegram_ui.py
+@@ -112,3 +112,35 @@ def test_dashboard_text_summarizes_state_counts_and_slots():
+     assert "Ожидает: <b>1</b>" in text
+     assert "Ошибки: <b>1</b>" in text
+     assert "10:00 · 13:00 · 18:00 · 21:00" in text
++
++
++def test_finance_emoji_ids_are_used_for_every_control_button():
++    import telegram_ui
++
++    assert telegram_ui.FINANCE_EMOJI_IDS["🚀"] == 5195033767969839232
++    assert telegram_ui.FINANCE_EMOJI_IDS["📥"] == 5443127283898405358
++    assert telegram_ui.FINANCE_EMOJI_IDS["📤"] == 5445355530111437729
++    assert telegram_ui.FINANCE_EMOJI_IDS["📈"] == 5197503331215361533
++    assert telegram_ui.FINANCE_EMOJI_IDS["🛡"] == 5197288647275071607
++
++    telegram_ui.use_finance_emoji_icons()
++    grids = [
++        telegram_ui.main_buttons(enabled=True),
++        telegram_ui.queue_buttons(),
++        telegram_ui.source_buttons(["@one"]),
++        telegram_ui.schedule_buttons(["10:00"]),
++        telegram_ui.settings_buttons(enabled=True, moderation=False),
++        telegram_ui.log_buttons(),
++    ]
++    buttons = [button for grid in grids for row in grid for button in row]
++
++    assert buttons
++    assert all(button.style.icon in telegram_ui.FINANCE_EMOJI_IDS.values() for button in buttons)
++
++
++def test_queue_text_displays_the_planning_date():
++    import telegram_ui
++
++    text = telegram_ui.queue_text([], day="2026-08-12")
++
++    assert "12.08.2026" in text

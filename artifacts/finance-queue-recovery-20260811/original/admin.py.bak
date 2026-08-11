@@ -9,7 +9,6 @@ from html import escape
 from pathlib import Path
 
 from telethon import Button, events, functions, types
-from telethon.errors import MessageNotModifiedError
 
 import botlogs
 import builder
@@ -71,17 +70,9 @@ async def _call_view(method, text: str, buttons_factory, **kwargs):
     common = {"parse_mode": "html", "link_preview": False, **kwargs}
     try:
         return await method(text, buttons=buttons_factory(True), **common)
-    except MessageNotModifiedError:
-        return None
-    except Exception as exc:
-        error_text = f"{type(exc).__name__}: {exc}".upper()
-        if not any(token in error_text for token in ("CUSTOM_EMOJI", "BUTTON", "ICON")):
-            raise
-        log.warning("Premium-кнопки отклонены Telegram; использую Unicode: %s", exc)
-        try:
-            return await method(text, buttons=buttons_factory(False), **common)
-        except MessageNotModifiedError:
-            return None
+    except Exception:
+        log.warning("Premium-кнопки отклонены Telegram; использую Unicode", exc_info=True)
+        return await method(text, buttons=buttons_factory(False), **common)
 
 
 async def send_view(event, text: str, buttons_factory):
@@ -93,7 +84,7 @@ async def edit_view(event, text: str, buttons_factory):
 
 
 def home_view(*, premium: bool = True):
-    rows = storage.list_queue(builder.queue_day())
+    rows = storage.list_queue(storage.today())
     counts = Counter(row[5] for row in rows)
     enabled = storage.get("enabled") == "1"
     return (
@@ -188,7 +179,7 @@ async def handle_now(event, reader, bot):
 
 
 async def refresh_queue(reader):
-    day = builder.queue_day()
+    day = storage.today()
     pending = storage.pending_count(day)
     replaced = 0
     if pending:
@@ -200,8 +191,7 @@ async def refresh_queue(reader):
 
 
 async def _show_queue(event):
-    day = builder.queue_day()
-    text = telegram_ui.queue_text(storage.list_queue(day), day=day)
+    text = telegram_ui.queue_text(storage.list_queue(storage.today()))
     return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
 
 
@@ -279,14 +269,13 @@ async def handle_ui_callback(event, reader, bot):
         text = (
             f"🔄 <b>Очередь обновлена</b>\n"
             f"Заменено: <b>{removed}</b> · добавлено: <b>{added}</b>\n\n"
-            + telegram_ui.queue_text(storage.list_queue(builder.queue_day()), day=builder.queue_day())
+            + telegram_ui.queue_text(storage.list_queue(storage.today()))
         )
         return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
     if data == "ui:build":
         await event.answer("Собираю очередь…")
-        day = builder.queue_day()
-        added = await asyncio.wait_for(builder.build_day(reader, day), timeout=config.BUILD_TIMEOUT_SEC)
-        text = f"⛏ <b>Сборка завершена</b> · добавлено: <b>{added}</b>\n\n" + telegram_ui.queue_text(storage.list_queue(day), day=day)
+        added = await asyncio.wait_for(builder.build_day(reader), timeout=config.BUILD_TIMEOUT_SEC)
+        text = f"🧩 <b>Сборка завершена</b> · добавлено: <b>{added}</b>\n\n" + telegram_ui.queue_text(storage.list_queue(storage.today()))
         return await edit_view(event, text, lambda premium: telegram_ui.queue_buttons(premium=premium))
     if data == "ui:sources":
         return await _show_sources(event)
@@ -532,9 +521,7 @@ def register(bot, reader):
         if owner(event):
             await send_view(
                 event,
-                telegram_ui.queue_text(
-                    storage.list_queue(builder.queue_day()), day=builder.queue_day()
-                ),
+                telegram_ui.queue_text(storage.list_queue(storage.today())),
                 lambda premium: telegram_ui.queue_buttons(premium=premium),
             )
 
